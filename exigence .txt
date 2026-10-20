@@ -1,0 +1,6 @@
+une vraie liste de ville on choisi d'abord le département , la ville , ainsi de suite jusqu'au quartier
+
+ajouter une possibilité d'ajouter un note vocale dans laquelle le user indique sa maison 
+faire fonctionner ls api google 
+
+donner à l'admin une gestion des produits, users, et de tout !
