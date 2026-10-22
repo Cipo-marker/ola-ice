@@ -109,7 +109,7 @@ class OlaIceStore {
     const deliveryFee = customDeliveryFee !== undefined ? customDeliveryFee : zone?.delivery_fee || 0;
     return { itemsDetails, subtotal, normalSubtotal, discountAmount: Math.max(0, normalSubtotal - subtotal), deliveryFee, total: subtotal + deliveryFee, itemCount: this.cart.reduce((sum, item) => sum + item.quantity, 0) };
   }
-  async createOrder(payload: { customer_id?: string; customer_name: string; customer_phone: string; customer_email?: string; delivery_zone_id: string; delivery_address: string; delivery_landmark?: string; delivery_location?: BeninLocation | null; order_type?: OrderType; customer_note?: string; customer_voice_note?: { mime_type: string; data_base64: string }; custom_delivery_fee?: number; customer_latitude?: number; customer_longitude?: number; delivery_distance_meters?: number; delivery_distance_text?: string; delivery_fee_calculation_mode?: 'gps_distance' | 'zone_fixed' }): Promise<{ success: boolean; order?: Order; error?: string }> {
+  async createOrder(payload: { customer_id?: string; customer_name: string; customer_phone: string; customer_email?: string; delivery_zone_id: string; delivery_address: string; delivery_landmark?: string; delivery_location?: BeninLocation | null; order_type?: OrderType; customer_note?: string; customer_voice_note?: { mime_type: string; data_base64: string }; customer_confirmation: { method: 'press_hold'; hold_duration_ms: number; confirmed_at: string }; custom_delivery_fee?: number; customer_latitude?: number; customer_longitude?: number; delivery_distance_meters?: number; delivery_distance_text?: string; delivery_fee_calculation_mode?: 'gps_distance' | 'zone_fixed' }): Promise<{ success: boolean; order?: Order; error?: string }> {
     if (!this.cart.length) return { success: false, error: 'Votre panier est vide.' };
     try {
       const result = await api<{ order: Order }>('/api/orders', { method: 'POST', body: JSON.stringify({ ...payload, items: this.cart.map(({ variant_id, quantity, flavor }) => ({ variant_id, quantity, flavor })) }) });
@@ -120,8 +120,17 @@ class OlaIceStore {
       return { success: true, order: result.order };
     } catch (error) { return { success: false, error: error instanceof Error ? error.message : 'La commande n’a pas pu être enregistrée.' }; }
   }
+  async claimOrder(orderId: string) {
+    try {
+      const { order } = await api<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}/claim`, { method: 'POST' });
+      this.orders = this.orders.map((row) => row.id === order.id ? order : row);
+      this.notify();
+      void this.refreshOrders();
+      return { success: true as const, order };
+    } catch (error) { return { success: false as const, error: error instanceof Error ? error.message : 'La course n’a pas pu être acceptée.' }; }
+  }
   canTransition(current: OrderStatus, target: OrderStatus) {
-    const next: Record<OrderStatus, OrderStatus[]> = { PENDING:['CONFIRMED','CANCELLED'], CONFIRMED:['PREPARING','CANCELLED'], PREPARING:['READY','CANCELLED'], READY:['OUT_FOR_DELIVERY','CANCELLED'], OUT_FOR_DELIVERY:['DELIVERED','FAILED_DELIVERY'], DELIVERED:[], CANCELLED:[], FAILED_DELIVERY:[] };
+    const next: Record<OrderStatus, OrderStatus[]> = { PENDING:['CONFIRMED','CANCELLED'], CONFIRMED:['PREPARING','CANCELLED'], PREPARING:['READY','CANCELLED'], READY:['ASSIGNED','CANCELLED'], ASSIGNED:['PICKED_UP'], PICKED_UP:['OUT_FOR_DELIVERY'], OUT_FOR_DELIVERY:['DELIVERED','FAILED_DELIVERY'], DELIVERED:[], CANCELLED:[], FAILED_DELIVERY:[] };
     return current === target || next[current].includes(target);
   }
   async updateOrderStatus(orderId: string, targetStatus: OrderStatus, _changedBy: string, comment?: string, deliveryAgentName?: string) {
@@ -164,8 +173,13 @@ class OlaIceStore {
   async saveStaff(staff: Partial<StaffAccount> & { id?: string; pin?: string; name: string; role: 'admin' | 'delivery'; zone: string }) {
     const creating = !staff.id;
     const path = creating ? '/api/admin/staff' : `/api/admin/staff/${encodeURIComponent(staff.id!)}`;
-    await api(path, { method: creating ? 'POST' : 'PUT', body: JSON.stringify({ staff }) });
-    await this.refreshStaff();
+    const result = await api<{ staff: StaffAccount }>(path, { method: creating ? 'POST' : 'PUT', body: JSON.stringify({ staff }) });
+    this.staff = creating
+      ? [...this.staff.filter((person) => person.id !== result.staff.id), result.staff]
+      : this.staff.map((person) => person.id === result.staff.id ? result.staff : person);
+    this.notify();
+    // The save is already confirmed. A list refresh failure must not be reported as a failed save.
+    await this.refreshStaff().catch(() => undefined);
   }
   async archiveStaff(id: string) {
     await api(`/api/admin/staff/${encodeURIComponent(id)}`, { method: 'DELETE' });

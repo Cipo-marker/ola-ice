@@ -3,6 +3,8 @@ export type OrderStatus =
   | 'CONFIRMED'
   | 'PREPARING'
   | 'READY'
+  | 'ASSIGNED'
+  | 'PICKED_UP'
   | 'OUT_FOR_DELIVERY'
   | 'DELIVERED'
   | 'CANCELLED'
@@ -140,6 +142,9 @@ export interface StaffAccount {
   name: string;
   role: 'admin' | 'delivery';
   zone: string;
+  departments?: string[];
+  phone?: string;
+  licensePlate?: string;
   is_active: boolean;
 }
 
@@ -169,8 +174,19 @@ export interface Order {
   payment_status: PaymentStatus;
   order_status: OrderStatus;
   delivery_agent_name?: string;
+  delivery_agent_id?: string;
+  delivery_agent_phone?: string;
+  delivery_agent_plate?: string;
+  delivery_selected_agent_id?: string;
+  delivery_selected_agent_name?: string;
+  delivery_assignment_status?: 'unmatched' | 'pending' | 'auto_assigned' | 'offered' | 'accepted';
+  delivery_candidate_ids?: string[];
+  delivery_assigned_at?: string;
   customer_note?: string;
   customer_voice_note_available?: boolean;
+  customer_confirmed_at?: string;
+  customer_confirmation_method?: 'press_hold';
+  customer_confirmation_hold_ms?: number;
   admin_note?: string;
   placed_at: string;
   confirmed_at?: string;

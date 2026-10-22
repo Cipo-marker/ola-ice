@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { authService, REGISTERED_DRIVERS } from '../services/auth';
+import { authService } from '../services/auth';
 import { ShieldCheck, Truck, Lock, X, Check, AlertCircle } from 'lucide-react';
 
 interface StaffLoginModalProps {
@@ -17,7 +17,8 @@ export const StaffLoginModal: React.FC<StaffLoginModalProps> = ({
 }) => {
   const [tab, setTab] = useState<'admin' | 'delivery'>(initialRole);
   const [adminPin, setAdminPin] = useState('');
-  const [selectedDriver, setSelectedDriver] = useState(REGISTERED_DRIVERS[0]?.name || '');
+  const [drivers, setDrivers] = useState<Array<{ name: string; zone: string; departments: string[] }>>([]);
+  const [selectedDriver, setSelectedDriver] = useState('');
   const [driverPin, setDriverPin] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -29,6 +30,16 @@ export const StaffLoginModal: React.FC<StaffLoginModalProps> = ({
       setDriverPin('');
     }
   }, [isOpen, initialRole]);
+
+  React.useEffect(() => {
+    if (!isOpen || tab !== 'delivery') return;
+    void fetch('/api/staff/delivery-list').then((response) => response.json()).then((result) => {
+      if (Array.isArray(result.drivers)) {
+        setDrivers(result.drivers);
+        setSelectedDriver((current) => result.drivers.some((driver: { name: string }) => driver.name === current) ? current : result.drivers[0]?.name || '');
+      }
+    }).catch(() => setDrivers([]));
+  }, [isOpen, tab]);
 
   const handleAdminSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,9 +172,9 @@ export const StaffLoginModal: React.FC<StaffLoginModalProps> = ({
                   onChange={(e) => setSelectedDriver(e.target.value)}
                   className="w-full px-4 py-3 rounded-xl border border-neutral-300 text-sm font-semibold text-neutral-900 bg-white focus:outline-none focus:ring-2 focus:ring-sky-500"
                 >
-                  {REGISTERED_DRIVERS.map((d) => (
+                  {drivers.map((d) => (
                     <option key={d.name} value={d.name}>
-                      {d.name} · {d.zone}
+                      {d.name} · {d.zone || d.departments.join(', ')}
                     </option>
                   ))}
                 </select>

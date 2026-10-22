@@ -30,8 +30,10 @@ const STATUS_STEPS: Array<{ key: OrderStatus; label: string; description: string
   { key: 'CONFIRMED', label: '2. Validée', description: 'Confirmée par l’équipe' },
   { key: 'PREPARING', label: '3. En préparation', description: 'Glacière isotherme & emballage' },
   { key: 'READY', label: '4. Prête', description: 'Prête pour le départ' },
-  { key: 'OUT_FOR_DELIVERY', label: '5. En livraison', description: 'Livreur en route vers vous' },
-  { key: 'DELIVERED', label: '6. Livrée & Encaissée', description: 'Colis remis et payé en espèces' },
+  { key: 'ASSIGNED', label: '5. Livreur confirmé', description: 'Votre livreur a accepté la course' },
+  { key: 'PICKED_UP', label: '6. Colis récupéré', description: 'Le livreur a pris le colis' },
+  { key: 'OUT_FOR_DELIVERY', label: '7. En livraison', description: 'Livreur en route vers vous' },
+  { key: 'DELIVERED', label: '8. Livrée & Encaissée', description: 'Colis remis et payé en espèces' },
 ];
 
 export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
@@ -315,7 +317,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
               </div>
 
               {/* Steps timeline */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {STATUS_STEPS.map((step) => {
                   const state = getStepStatus(step.key, searchedOrder.order_status);
                   return (
@@ -347,6 +349,8 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
                   <div>
                     <div className="font-bold text-sky-950">Livreur Moto en Charge</div>
                     <div className="text-sky-700 font-semibold">{searchedOrder.delivery_agent_name}</div>
+                    {searchedOrder.delivery_agent_phone && <a href={`tel:${searchedOrder.delivery_agent_phone}`} className="mt-1 block font-mono text-sky-800 underline">{searchedOrder.delivery_agent_phone}</a>}
+                    {searchedOrder.delivery_agent_plate && <div className="mt-1 text-neutral-600">Plaque : <strong>{searchedOrder.delivery_agent_plate}</strong></div>}
                   </div>
                 </div>
                 <div className="text-right">

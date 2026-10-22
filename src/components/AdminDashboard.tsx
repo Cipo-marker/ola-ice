@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { store } from '../services/store';
 import { Category, CustomerProfile, Order, OrderStatus, Product, ProductVariant, DeliveryZone, StaffAccount } from '../types';
 import { BeninLocationSelector } from './BeninLocationSelector';
@@ -34,14 +34,6 @@ interface AdminDashboardProps {
   onLogout?: () => void;
 }
 
-const RIDERS_LIST = [
-  'Koffi (Moto Express 01 - Cotonou)',
-  'Moussa (Moto Express 02 - Calavi & Godomey)',
-  'Aïcha (Moto Express 03 - Akpakpa)',
-  'Bio (Moto Express 04 - Haie Vive & Cadjehoun)',
-  'Retrait sur place (Comptoir Ola Ice)',
-];
-
 const STATUS_CONFIG: Record<
   OrderStatus,
   { label: string; bg: string; text: string; border: string }
@@ -50,6 +42,8 @@ const STATUS_CONFIG: Record<
   CONFIRMED: { label: 'Confirmée', bg: 'bg-indigo-50', text: 'text-indigo-800', border: 'border-indigo-200' },
   PREPARING: { label: 'En préparation', bg: 'bg-rose-50', text: 'text-rose-800', border: 'border-rose-200' },
   READY: { label: 'Prête', bg: 'bg-purple-50', text: 'text-purple-800', border: 'border-purple-200' },
+  ASSIGNED: { label: 'Livreur accepté', bg: 'bg-indigo-50', text: 'text-indigo-800', border: 'border-indigo-200' },
+  PICKED_UP: { label: 'Colis récupéré', bg: 'bg-violet-50', text: 'text-violet-800', border: 'border-violet-200' },
   OUT_FOR_DELIVERY: { label: 'En livraison', bg: 'bg-sky-50', text: 'text-sky-800', border: 'border-sky-300' },
   DELIVERED: { label: 'Livrée & Encaissée', bg: 'bg-emerald-50', text: 'text-emerald-800', border: 'border-emerald-300' },
   FAILED_DELIVERY: { label: 'Échec livraison', bg: 'bg-orange-50', text: 'text-orange-800', border: 'border-orange-200' },
@@ -65,6 +59,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [, setStoreRevision] = useState(0);
+  const [departmentOptions, setDepartmentOptions] = useState<Array<{ code: string; nom: string }>>([]);
+  const [orderSoundEnabled, setOrderSoundEnabled] = useState(false);
+  const orderAudioRef = useRef<AudioContext | null>(null);
+  const pendingSeenRef = useRef<Set<string> | null>(null);
 
   // Edit variant & zone modal state
   const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null);
@@ -73,6 +71,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [editingCustomer, setEditingCustomer] = useState<CustomerProfile | null>(null);
   const [editingStaff, setEditingStaff] = useState<(Partial<StaffAccount> & { pin?: string }) | null>(null);
+  const [coverageDraft, setCoverageDraft] = useState<(Partial<StaffAccount> & { pin?: string; role: 'delivery' }) | null>(null);
+  const [coverageSaveError, setCoverageSaveError] = useState<string | null>(null);
+  const [coverageSaving, setCoverageSaving] = useState(false);
 
   const orders = store.getOrders();
   const products = store.getAllProducts();
@@ -80,13 +81,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
   const zones = store.getAllZones();
   const customers = store.getCustomers();
   const staff = store.getStaff();
+  const pendingOrderIds = orders.filter((order) => order.order_status === 'PENDING').map((order) => order.id).join('|');
 
   useEffect(() => {
     const unsubscribe = store.subscribe(() => setStoreRevision((revision) => revision + 1));
     void store.refreshCustomers().catch(() => undefined);
     void store.refreshStaff().catch(() => undefined);
-    return unsubscribe;
+    void store.refreshOrders().catch(() => undefined);
+    const orderRefreshTimer = window.setInterval(() => { void store.refreshOrders().catch(() => undefined); }, 5000);
+    fetch('https://geobj.emunadigitalsolution.com/api/v1/departements').then((response) => response.json()).then((result) => { if (Array.isArray(result.data)) setDepartmentOptions(result.data); }).catch(() => undefined);
+    return () => { unsubscribe(); window.clearInterval(orderRefreshTimer); };
   }, []);
+
+  useEffect(() => {
+    const ids = new Set(pendingOrderIds ? pendingOrderIds.split('|') : []);
+    if (pendingSeenRef.current === null) { pendingSeenRef.current = ids; return; }
+    const newIds = [...ids].filter((id) => !pendingSeenRef.current?.has(id));
+    pendingSeenRef.current = ids;
+    if (!newIds.length) return;
+    setToastMessage(`${newIds.length} nouvelle${newIds.length > 1 ? 's' : ''} commande${newIds.length > 1 ? 's' : ''} à traiter.`);
+    const context = orderAudioRef.current;
+    if (orderSoundEnabled && context) {
+      const oscillator = context.createOscillator(); const gain = context.createGain();
+      oscillator.frequency.value = 740; gain.gain.setValueAtTime(0.0001, context.currentTime); gain.gain.exponentialRampToValueAtTime(0.2, context.currentTime + 0.03); gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.5);
+      oscillator.connect(gain); gain.connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + 0.55);
+    }
+  }, [pendingOrderIds, orderSoundEnabled]);
+
+  const enableOrderSound = async () => {
+    if (!window.AudioContext) { showToast('Le son des notifications n’est pas pris en charge.'); return; }
+    const context = orderAudioRef.current || new window.AudioContext(); orderAudioRef.current = context;
+    await context.resume(); setOrderSoundEnabled(true); showToast('Alerte sonore des nouvelles commandes activée.');
+  };
 
   if (!isAdmin) {
     return (
@@ -201,8 +227,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
   const handleSaveStaff = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingStaff?.name || !editingStaff.role) return;
+    if (editingStaff.role === 'delivery' && (!editingStaff.departments?.length || !editingStaff.phone || !editingStaff.licensePlate)) {
+      setCoverageDraft({ ...editingStaff, role: 'delivery', departments: editingStaff.departments || [], phone: editingStaff.phone || '', licensePlate: editingStaff.licensePlate || '' });
+      setEditingStaff(null);
+      return;
+    }
     try { await store.saveStaff({ ...editingStaff, name: editingStaff.name, role: editingStaff.role, zone: editingStaff.zone || '' }); setEditingStaff(null); showToast('✓ Compte personnel enregistré.'); }
     catch (error) { showToast(`⚠️ ${error instanceof Error ? error.message : 'Enregistrement impossible.'}`); }
+  };
+
+  const handleSaveCoverage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!coverageDraft?.name?.trim() || !coverageDraft.departments?.length || !coverageDraft.phone?.trim() || !coverageDraft.licensePlate?.trim()) { showToast('Indiquez le nom, les départements, le téléphone et la plaque du livreur.'); return; }
+    if (coverageSaving) return;
+    setCoverageSaving(true);
+    setCoverageSaveError(null);
+    try {
+      await store.saveStaff({ ...coverageDraft, name: coverageDraft.name.trim(), role: 'delivery', zone: coverageDraft.zone || '' });
+      setCoverageDraft(null);
+      showToast('Profil et départements du livreur enregistrés.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Enregistrement impossible.';
+      setCoverageSaveError(/401|connexion du personnel/i.test(message) ? 'Votre session administrateur a expiré. Fermez cette fenêtre, reconnectez-vous comme administrateur, puis réessayez.' : message);
+    } finally { setCoverageSaving(false); }
   };
 
   const handleSaveZone = async (e: React.FormEvent) => {
@@ -397,6 +444,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
       {/* Tab 1: Orders Management */}
       {activeTab === 'orders' && (
         <div className="space-y-4">
+          <div className="flex justify-end"><button type="button" onClick={() => void enableOrderSound()} className={`rounded-xl px-3 py-2 text-xs font-bold ${orderSoundEnabled ? 'bg-emerald-100 text-emerald-800' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}>{orderSoundEnabled ? 'Alerte sonore activée' : 'Activer les alertes sonores de commande'}</button></div>
           {/* Controls: Search & Status Filters */}
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white p-3 sm:p-4 rounded-2xl border border-neutral-200 shadow-xs">
             <div className="relative w-full sm:w-80">
@@ -419,6 +467,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                 { id: 'all', label: 'Tous' },
                 { id: 'PENDING', label: 'En attente' },
                 { id: 'CONFIRMED', label: 'Confirmées' },
+                { id: 'PREPARING', label: 'En préparation' },
+                { id: 'READY', label: 'Prêtes' },
+                { id: 'ASSIGNED', label: 'Livreur accepté' },
+                { id: 'PICKED_UP', label: 'Colis récupéré' },
                 { id: 'OUT_FOR_DELIVERY', label: 'En livraison' },
                 { id: 'DELIVERED', label: 'Livrées' },
                 { id: 'CANCELLED', label: 'Annulées' },
@@ -512,32 +564,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                               <option value="CONFIRMED">✓ Confirmée</option>
                               <option value="PREPARING">👨‍🍳 En préparation</option>
                               <option value="READY">📦 Prête</option>
-                              <option value="OUT_FOR_DELIVERY">🛵 En livraison</option>
-                              <option value="DELIVERED">✓ Livrée & Encaissée</option>
-                              <option value="FAILED_DELIVERY">⚠️ Échec livraison</option>
+                              <option value="ASSIGNED" disabled>✓ Livreur accepté</option>
+                              <option value="PICKED_UP" disabled>🛍️ Colis récupéré</option>
+                              <option value="OUT_FOR_DELIVERY" disabled>🛵 En livraison (livreur)</option>
+                              <option value="DELIVERED" disabled>✓ Livrée & Encaissée (livreur)</option>
+                              <option value="FAILED_DELIVERY" disabled>⚠️ Échec livraison (livreur)</option>
                               <option value="CANCELLED">✕ Annulée</option>
                             </select>
                           </td>
-                          <td className="p-3.5">
-                            <select
-                              value={ord.delivery_agent_name || ''}
-                              onChange={(e) => {
-                                const newRider = e.target.value;
-                                handleStatusChange(
-                                  ord.id,
-                                  ord.order_status === 'PENDING' ? 'CONFIRMED' : ord.order_status,
-                                  newRider
-                                );
-                              }}
-                              className="px-2 py-1 bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-700 max-w-[160px] truncate focus:outline-none focus:ring-1 focus:ring-rose-500"
-                            >
-                              <option value="">-- Non assigné --</option>
-                              {RIDERS_LIST.map((rider) => (
-                                <option key={rider} value={rider}>
-                                  {rider}
-                                </option>
-                              ))}
-                            </select>
+                          <td className="p-3.5 text-xs">
+                            {ord.delivery_agent_name ? <div className="font-semibold text-sky-800">{ord.delivery_agent_name}</div> : <div className="font-medium text-neutral-500">{ord.delivery_assignment_status === 'offered' ? 'Offerte aux livreurs du département' : ord.delivery_assignment_status === 'auto_assigned' ? `Livreur sélectionné : ${ord.delivery_selected_agent_name || 'confirmation en attente'}` : ord.delivery_assignment_status === 'unmatched' ? 'Aucun livreur configuré pour ce département' : 'Attribution en attente de préparation'}</div>}
+                            {ord.delivery_agent_plate && <div className="text-[10px] text-neutral-500">Plaque {ord.delivery_agent_plate}</div>}
                           </td>
                           <td className="p-3.5 text-right space-x-1.5 whitespace-nowrap">
                             {/* ONE-CLICK ACTION BUTTONS */}
@@ -549,31 +586,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                               >
                                 <Check className="w-3 h-3" />
                                 <span>Valider</span>
-                              </button>
-                            )}
-
-                            {(ord.order_status === 'PENDING' ||
-                              ord.order_status === 'CONFIRMED' ||
-                              ord.order_status === 'PREPARING' ||
-                              ord.order_status === 'READY') && (
-                              <button
-                                onClick={() => handleStatusChange(ord.id, 'OUT_FOR_DELIVERY')}
-                                className="px-2.5 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs inline-flex items-center gap-1"
-                                title="Passer directement en livraison"
-                              >
-                                <Truck className="w-3 h-3" />
-                                <span>En livraison</span>
-                              </button>
-                            )}
-
-                            {ord.order_status === 'OUT_FOR_DELIVERY' && (
-                              <button
-                                onClick={() => handleStatusChange(ord.id, 'DELIVERED')}
-                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-black transition-all shadow-xs inline-flex items-center gap-1 animate-pulse"
-                                title="Encaisser les espèces et finaliser la commande"
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                <span>Livré & Encaissé</span>
                               </button>
                             )}
 
@@ -786,9 +798,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
       )}
 
       {activeTab === 'staff' && <section className="space-y-4 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xs">
-        <div className="flex items-center justify-between gap-3"><div><h3 className="font-display text-base font-bold text-neutral-900">Comptes du personnel</h3><p className="text-xs text-neutral-500">Gérez les accès direction et livraison.</p></div><button type="button" onClick={() => setEditingStaff({ name: '', role: 'delivery', zone: '', is_active: true, pin: '' })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white"><Plus className="h-4 w-4"/>Ajouter un compte</button></div>
+        <div className="flex items-center justify-between gap-3"><div><h3 className="font-display text-base font-bold text-neutral-900">Comptes du personnel</h3><p className="text-xs text-neutral-500">Gérez les accès et départements de livraison des livreurs.</p></div><button type="button" onClick={() => setEditingStaff({ name: '', role: 'delivery', zone: '', departments: [], phone: '', licensePlate: '', is_active: true, pin: '' })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white"><Plus className="h-4 w-4"/>Ajouter un compte</button></div>
         <div className="divide-y divide-neutral-100">{staff.map((person) => <div key={person.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-semibold text-sm text-neutral-900">{person.name}</div><div className="text-xs text-neutral-500">{person.role === 'admin' ? 'Direction' : 'Livreur'}{person.zone ? ` · ${person.zone}` : ''} · {person.is_active ? 'Actif' : 'Désactivé'}</div></div><div className="flex items-center gap-2"><button type="button" onClick={() => setEditingStaff({ ...person, pin: '' })} className="rounded-lg border border-neutral-200 px-2.5 py-1.5 text-[11px] font-bold"><Pencil className="mr-1 inline h-3 w-3"/>Modifier</button>{person.is_active ? <button type="button" onClick={() => { if (window.confirm(`Désactiver le compte de ${person.name} ?`)) void store.archiveStaff(person.id).then(() => showToast('Compte désactivé.')); }} className="text-[11px] font-bold text-neutral-500"><Archive className="mr-1 inline h-3 w-3"/>Désactiver</button> : <button type="button" onClick={() => void store.saveStaff({ ...person, is_active: true }).then(() => showToast('Compte réactivé.'))} className="text-[11px] font-bold text-sky-700">Réactiver</button>}</div></div>)}</div>
       </section>}
+
+      {activeTab === 'staff' && <section className="space-y-3 rounded-2xl border border-sky-200 bg-sky-50/50 p-4 shadow-xs">
+        <div><h3 className="font-display text-base font-bold text-neutral-900">Couverture et coordonnées des livreurs</h3><p className="text-xs text-neutral-600">Chaque livreur ne recevra que les courses des départements sélectionnés. Le premier à accepter une offre la prend en charge.</p></div>
+        <div className="flex flex-wrap gap-2">{staff.filter((person) => person.role === 'delivery').map((person) => <button key={person.id} type="button" onClick={() => setCoverageDraft({ ...person, role: 'delivery', pin: '' })} className="rounded-xl border border-sky-200 bg-white px-3 py-2 text-xs font-bold text-sky-900 hover:border-sky-400">Configurer {person.name}</button>)}<button type="button" onClick={() => setCoverageDraft({ role: 'delivery', name: '', zone: '', departments: [], phone: '', licensePlate: '', pin: '', is_active: true })} className="rounded-xl bg-sky-700 px-3 py-2 text-xs font-bold text-white">Ajouter un livreur et choisir ses départements</button></div>
+        {staff.filter((person) => person.role === 'delivery').map((person) => <div key={`${person.id}-coverage`} className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-neutral-700"><strong>{person.name}</strong><span>{(person.departments || []).map((code) => departmentOptions.find((item) => item.code === code)?.nom || code).join(', ') || 'Aucun département configuré'}</span>{person.phone && <span>Tél. {person.phone}</span>}{person.licensePlate && <span>Plaque {person.licensePlate}</span>}</div>)}
+      </section>}
+
+      {coverageDraft && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"><form onSubmit={handleSaveCoverage} className="max-h-[90vh] w-full max-w-lg space-y-3 overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl">
+        <div className="flex items-center justify-between"><h3 className="font-display text-lg font-black">{coverageDraft.id ? 'Départements et fiche livreur' : 'Nouveau livreur'}</h3><button type="button" onClick={() => setCoverageDraft(null)}><X className="h-4 w-4"/></button></div>
+        <label className="block text-xs font-semibold">Nom complet<input required value={coverageDraft.name || ''} onChange={(e) => setCoverageDraft({ ...coverageDraft, name: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label>
+        <label className="block text-xs font-semibold">Départements desservis (choix multiple)<select multiple required value={coverageDraft.departments || []} onChange={(e) => setCoverageDraft({ ...coverageDraft, departments: Array.from(e.currentTarget.selectedOptions, (option) => option.value) })} className="mt-1 h-40 w-full rounded-lg border p-2">{departmentOptions.map((department) => <option key={department.code} value={department.code}>{department.nom}</option>)}</select><span className="mt-1 block text-[10px] font-normal text-neutral-500">Sur ordinateur, maintenez Ctrl pour choisir plusieurs départements.</span></label>
+        <div className="grid grid-cols-2 gap-2"><label className="block text-xs font-semibold">Téléphone du livreur *<input required value={coverageDraft.phone || ''} onChange={(e) => setCoverageDraft({ ...coverageDraft, phone: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">Plaque de la moto *<input required value={coverageDraft.licensePlate || ''} onChange={(e) => setCoverageDraft({ ...coverageDraft, licensePlate: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label></div>
+        <label className="block text-xs font-semibold">Secteur<input value={coverageDraft.zone || ''} onChange={(e) => setCoverageDraft({ ...coverageDraft, zone: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label>
+        <label className="block text-xs font-semibold">Code PIN {coverageDraft.id ? '(laisser vide pour conserver)' : '(6 caractères minimum)'}<input type="password" minLength={coverageDraft.id ? 0 : 6} required={!coverageDraft.id} value={coverageDraft.pin || ''} onChange={(e) => setCoverageDraft({ ...coverageDraft, pin: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label>
+        {coverageSaveError && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">{coverageSaveError}</div>}
+        <button disabled={coverageSaving} className="w-full rounded-xl bg-sky-700 py-2.5 font-bold text-white disabled:cursor-wait disabled:opacity-60">{coverageSaving ? 'Enregistrement…' : 'Enregistrer le profil livreur'}</button>
+      </form></div>}
 
       {/* Selected Order Detail Modal */}
       {selectedOrder && (
@@ -846,7 +875,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                   { id: 'DELIVERED', label: '🎉 Livrée & Payée' },
                   { id: 'FAILED_DELIVERY', label: '⚠️ Échec livraison' },
                   { id: 'CANCELLED', label: '✕ Annulée' },
-                ].map((s) => (
+                ].filter((status) => ['CONFIRMED', 'PREPARING', 'READY', 'CANCELLED'].includes(status.id) && store.canTransition(selectedOrder.order_status, status.id as OrderStatus)).map((s) => (
                   <button
                     key={s.id}
                     onClick={() =>
@@ -863,31 +892,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                 ))}
               </div>
 
-              {/* Driver Assignment Dropdown in Modal */}
-              <div className="pt-2 border-t border-neutral-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                <span className="font-semibold text-neutral-700 flex items-center gap-1.5">
-                  <UserCheck className="w-3.5 h-3.5 text-sky-600" />
-                  <span>Assigner un livreur :</span>
-                </span>
-                <select
-                  value={selectedOrder.delivery_agent_name || ''}
-                  onChange={(e) => {
-                    const rider = e.target.value;
-                    handleStatusChange(
-                      selectedOrder.id,
-                      selectedOrder.order_status,
-                      rider
-                    );
-                  }}
-                  className="px-3 py-1.5 rounded-xl border border-neutral-300 bg-white font-medium text-neutral-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                >
-                  <option value="">-- Choisir un livreur --</option>
-                  {RIDERS_LIST.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
+              <div className="pt-2 border-t border-neutral-200 text-xs">
+                <span className="font-semibold text-neutral-700">Affectation automatique : </span>
+                {selectedOrder.delivery_agent_name ? <span className="text-sky-800">{selectedOrder.delivery_agent_name}{selectedOrder.delivery_agent_phone ? ` · ${selectedOrder.delivery_agent_phone}` : ''}{selectedOrder.delivery_agent_plate ? ` · Plaque ${selectedOrder.delivery_agent_plate}` : ''}</span> : <span className="text-neutral-600">{selectedOrder.delivery_assignment_status === 'offered' ? 'offerte aux livreurs de ce département, en attente d’acceptation' : selectedOrder.delivery_assignment_status === 'auto_assigned' ? `sélection automatique pour ${selectedOrder.delivery_selected_agent_name || 'un livreur'}, en attente d’acceptation` : selectedOrder.delivery_assignment_status === 'unmatched' ? 'aucun livreur configuré pour ce département' : 'en attente de préparation'}</span>}
               </div>
             </div>
 

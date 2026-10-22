@@ -38,7 +38,11 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
   const isAuthorized = authService.isDelivery() || authService.isAdmin();
 
   const orders = store.getOrders();
+  const [, setStoreRevision] = useState(0);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const soundContextRef = useRef<AudioContext | null>(null);
+  const previousOfferIdsRef = useRef<Set<string> | null>(null);
   const [failingOrderId, setFailingOrderId] = useState<string | null>(null);
 
   // Live Courier Geolocation state
@@ -52,6 +56,48 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  useEffect(() => {
+    if (!isAuthorized) return;
+    const unsubscribe = store.subscribe(() => setStoreRevision((revision) => revision + 1));
+    const refresh = () => { void store.refreshOrders().catch(() => undefined); };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => { unsubscribe(); window.clearInterval(timer); };
+  }, [isAuthorized]);
+
+  const eligibleOffers = orders.filter((order) => order.order_status === 'READY' && (order.delivery_candidate_ids || []).includes(currentUser?.badgeId || '') && (!order.delivery_agent_id || order.delivery_agent_id === currentUser?.badgeId));
+  useEffect(() => {
+    const currentIds = new Set(eligibleOffers.map((order) => order.id));
+    if (previousOfferIdsRef.current === null) { previousOfferIdsRef.current = currentIds; return; }
+    const hasNewOffer = [...currentIds].some((id) => !previousOfferIdsRef.current?.has(id));
+    previousOfferIdsRef.current = currentIds;
+    if (hasNewOffer) {
+      showToast('Nouvelle course à accepter dans votre département.');
+      if (soundEnabled && soundContextRef.current) {
+        const context = soundContextRef.current;
+        [0, 0.22, 0.44].forEach((delay) => {
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          oscillator.frequency.value = 880;
+          gain.gain.setValueAtTime(0.0001, context.currentTime + delay);
+          gain.gain.exponentialRampToValueAtTime(0.18, context.currentTime + delay + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + delay + 0.18);
+          oscillator.connect(gain); gain.connect(context.destination);
+          oscillator.start(context.currentTime + delay); oscillator.stop(context.currentTime + delay + 0.2);
+        });
+      }
+    }
+  }, [eligibleOffers, soundEnabled]);
+
+  const handleEnableSound = async () => {
+    if (!window.AudioContext) { showToast('Le son des notifications n’est pas pris en charge.'); return; }
+    const context = soundContextRef.current || new window.AudioContext();
+    soundContextRef.current = context;
+    await context.resume();
+    setSoundEnabled(true);
+    showToast('Son des offres activé. Gardez cet écran ouvert.');
   };
 
   // Toggle courier live GPS tracking
@@ -159,18 +205,12 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
   const driverName = currentUser.name;
 
   const activeDeliveries = orders.filter((o) => {
-    const isOut = o.order_status === 'OUT_FOR_DELIVERY';
-    const isReady = o.order_status === 'READY';
-    const isAssignedToMe =
-      o.delivery_agent_name && o.delivery_agent_name.includes(driverName.split(' ')[0]);
-    const isUnassigned = !o.delivery_agent_name || o.delivery_agent_name.trim() === '';
-
-    if (currentUser.role === 'admin') {
-      return isOut || isReady;
-    }
-
-    return (isOut && isAssignedToMe) || (isReady && (isAssignedToMe || isUnassigned));
+    if (currentUser.role === 'admin') return ['READY', 'ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(o.order_status);
+    return o.delivery_agent_id === currentUser.badgeId && ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(o.order_status) || o.order_status === 'READY' && (o.delivery_candidate_ids || []).includes(currentUser.badgeId);
   });
+  const completedDeliveries = currentUser.role === 'delivery'
+    ? orders.filter((o) => o.delivery_agent_id === currentUser.badgeId && ['DELIVERED', 'FAILED_DELIVERY'].includes(o.order_status))
+    : [];
 
   const handleMarkDelivered = async (orderId: string) => {
     const res = await store.updateOrderStatus(
@@ -201,7 +241,7 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
     showToast('⚠️ Incident de livraison enregistré.');
   };
 
-  const handleTakeDelivery = async (orderId: string) => {
+  const handleTakeDeliveryLegacy = async (orderId: string) => {
     const res = await store.updateOrderStatus(
       orderId,
       'OUT_FOR_DELIVERY',
@@ -219,6 +259,21 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
         handleToggleGps();
       }
     }
+  };
+
+  const handleTakeDelivery = async (orderId: string) => {
+    const result = await store.claimOrder(orderId);
+    if (!result.success) { showToast(`Erreur : ${result.error}`); return; }
+    showToast('Course acceptée. Le client voit maintenant ton nom et tes coordonnées.');
+    setExpandedMapOrderId(orderId);
+  };
+
+  const handleDeliveryStep = async (orderId: string, status: 'PICKED_UP' | 'OUT_FOR_DELIVERY') => {
+    const message = status === 'PICKED_UP' ? `${driverName} a récupéré le colis à la boutique.` : `${driverName} est parti en livraison.`;
+    const result = await store.updateOrderStatus(orderId, status, driverName, message);
+    if (!result.success) showToast(`Erreur : ${result.error}`);
+    else if (status === 'PICKED_UP') showToast('Colis récupéré. Le client est informé.');
+    else { showToast('Départ enregistré. Le client est informé.'); if (!isGpsActive) handleToggleGps(); }
   };
 
   return (
@@ -259,6 +314,8 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
             <span>Déconnexion</span>
           </button>
         </div>
+
+        {currentUser.role === 'delivery' && <button type="button" onClick={() => void handleEnableSound()} className={`rounded-xl border px-3 py-2 text-xs font-bold ${soundEnabled ? 'border-emerald-300 bg-emerald-500/20 text-white' : 'border-white/30 bg-white/10 text-white hover:bg-white/20'}`}>{soundEnabled ? 'Son des offres activé' : 'Activer le son des offres de course'}</button>}
 
         {/* Live GPS Tracker Controller Card for Courier */}
         <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3 sm:p-4 border border-white/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
@@ -351,8 +408,7 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
         ) : (
           activeDeliveries.map((order) => {
             const isAssigned =
-              order.delivery_agent_name &&
-              order.delivery_agent_name.includes(driverName.split(' ')[0]);
+              order.delivery_agent_id === currentUser.badgeId;
 
             const hasCustomerCoords =
               Boolean(order.customer_latitude && order.customer_longitude);
@@ -400,7 +456,7 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
                             : 'bg-amber-100 text-amber-800'
                         }`}
                       >
-                        {order.order_status === 'OUT_FOR_DELIVERY' ? 'En livraison' : 'Prête en boutique'}
+                        {order.order_status === 'OUT_FOR_DELIVERY' ? 'En livraison' : order.order_status === 'PICKED_UP' ? 'Colis récupéré' : order.order_status === 'ASSIGNED' ? 'Course acceptée' : 'Prête à prendre'}
                       </span>
                     </div>
                     <span className="text-xs text-neutral-500 font-medium">
@@ -479,6 +535,12 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
                       </audio>
                     </div>
                   )}
+                  <details className="rounded-xl border border-neutral-200 bg-white p-2.5">
+                    <summary className="cursor-pointer text-[11px] font-bold text-neutral-800">Historique enregistré ({order.status_history?.length || 0} étape{(order.status_history?.length || 0) > 1 ? 's' : ''})</summary>
+                    <ol className="mt-2 space-y-2 border-l-2 border-sky-100 pl-3">
+                      {[...(order.status_history || [])].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).map((entry) => <li key={entry.id} className="text-[10px] text-neutral-600"><div className="font-bold text-neutral-800">{entry.to_status.replaceAll('_', ' ')} · {new Date(entry.created_at).toLocaleString('fr-FR')}</div><div>{entry.changed_by}{entry.comment ? ` — ${entry.comment}` : ''}</div></li>)}
+                    </ol>
+                  </details>
                 </div>
 
                 {/* LIVE COURIER vs CUSTOMER MAP SECTION */}
@@ -619,14 +681,22 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
 
                 {/* Action buttons */}
                 <div className="pt-1 flex flex-col sm:flex-row gap-2">
-                  {order.order_status === 'READY' && (
+                  {order.order_status === 'READY' && currentUser.role === 'delivery' && (
                     <button
                       onClick={() => handleTakeDelivery(order.id)}
                       className="w-full py-3 bg-sky-600 hover:bg-sky-700 text-white font-bold rounded-2xl text-xs sm:text-sm transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                       <Truck className="w-4 h-4" />
-                      <span>Prendre en charge cette course (Départ)</span>
+                      <span>Accepter et prendre cette course</span>
                     </button>
+                  )}
+
+                  {order.order_status === 'ASSIGNED' && isAssigned && (
+                    <button onClick={() => handleDeliveryStep(order.id, 'PICKED_UP')} className="w-full py-3 bg-violet-700 hover:bg-violet-800 text-white font-bold rounded-2xl text-xs sm:text-sm">Confirmer le colis récupéré à la boutique</button>
+                  )}
+
+                  {order.order_status === 'PICKED_UP' && isAssigned && (
+                    <button onClick={() => handleDeliveryStep(order.id, 'OUT_FOR_DELIVERY')} className="w-full py-3 bg-sky-700 hover:bg-sky-800 text-white font-bold rounded-2xl text-xs sm:text-sm">Démarrer la livraison et informer le client</button>
                   )}
 
                   {order.order_status === 'OUT_FOR_DELIVERY' && isAssigned && (
@@ -711,6 +781,14 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
           })
         )}
       </div>
+      {completedDeliveries.length > 0 && <section className="space-y-3 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xs">
+        <h3 className="font-display text-base font-black text-neutral-900">Historique de mes courses ({completedDeliveries.length})</h3>
+        {completedDeliveries.map((order) => <article key={order.id} className="space-y-2 rounded-xl border border-neutral-100 bg-neutral-50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><div><strong className="font-mono text-sm">{order.order_number}</strong><div className="text-[11px] text-neutral-600">{order.customer_name} · {order.delivery_address}</div></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${order.order_status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>{order.order_status === 'DELIVERED' ? 'Livrée' : 'Échec de livraison'}</span></div>
+          {order.customer_voice_note_available && <div className="rounded-lg border border-rose-200 bg-rose-50 p-2"><div className="text-[10px] font-bold text-rose-900">Note vocale du client</div><audio controls preload="none" className="h-9 w-full" src={`/api/orders/${encodeURIComponent(order.id)}/voice-note`}>Lecture audio indisponible.</audio></div>}
+          <details className="rounded-lg border border-neutral-200 bg-white p-2"><summary className="cursor-pointer text-[11px] font-bold">Voir tout l’historique ({order.status_history?.length || 0} étape{(order.status_history?.length || 0) > 1 ? 's' : ''})</summary><ol className="mt-2 space-y-2 border-l-2 border-sky-100 pl-3">{[...(order.status_history || [])].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).map((entry) => <li key={entry.id} className="text-[10px] text-neutral-600"><div className="font-bold text-neutral-800">{entry.to_status.replaceAll('_', ' ')} · {new Date(entry.created_at).toLocaleString('fr-FR')}</div><div>{entry.changed_by}{entry.comment ? ` — ${entry.comment}` : ''}</div></li>)}</ol></details>
+        </article>)}
+      </section>}
     </div>
   );
 };

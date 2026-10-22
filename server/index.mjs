@@ -30,10 +30,13 @@ CREATE TABLE IF NOT EXISTS order_items(id TEXT PRIMARY KEY, order_id TEXT NOT NU
 CREATE INDEX IF NOT EXISTS order_items_order_idx ON order_items(order_id);
 CREATE TABLE IF NOT EXISTS order_status_histories(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, created_at TEXT NOT NULL, data TEXT NOT NULL, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS inventory_movements(id TEXT PRIMARY KEY, variant_id TEXT NOT NULL, order_id TEXT NOT NULL, movement_type TEXT NOT NULL, quantity INTEGER NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(variant_id) REFERENCES product_variants(id), FOREIGN KEY(order_id) REFERENCES orders(id));
-CREATE TABLE IF NOT EXISTS staff(id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, zone TEXT, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS staff(id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, zone TEXT, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1, departments TEXT NOT NULL DEFAULT '[]', phone TEXT, license_plate TEXT);
 `);
 
 if (!db.prepare('PRAGMA table_info(staff)').all().some((column) => column.name === 'is_active')) db.exec('ALTER TABLE staff ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
+if (!db.prepare('PRAGMA table_info(staff)').all().some((column) => column.name === 'departments')) db.exec("ALTER TABLE staff ADD COLUMN departments TEXT NOT NULL DEFAULT '[]'");
+if (!db.prepare('PRAGMA table_info(staff)').all().some((column) => column.name === 'phone')) db.exec('ALTER TABLE staff ADD COLUMN phone TEXT');
+if (!db.prepare('PRAGMA table_info(staff)').all().some((column) => column.name === 'license_plate')) db.exec('ALTER TABLE staff ADD COLUMN license_plate TEXT');
 
 const count = db.prepare('SELECT COUNT(*) AS count FROM categories').get().count;
 if (!count) {
@@ -121,6 +124,12 @@ function distanceFee(meters) {
   if (meters < 1000) return 100;
   return 200 + Math.floor((meters - 1000) / 500) * 100;
 }
+function matchingDeliveryStaff(departmentCode) {
+  if (!departmentCode) return [];
+  return db.prepare("SELECT id,name,zone,departments,phone,license_plate FROM staff WHERE role='delivery' AND is_active=1 ORDER BY name").all()
+    .map((row) => ({ ...row, departments: JSON.parse(row.departments || '[]') }))
+    .filter((row) => row.departments.includes(departmentCode));
+}
 
 async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
@@ -129,6 +138,10 @@ async function route(req, res) {
   if (req.method === 'GET' && path === '/api/bootstrap') return send(res, 200, {
     categories: readRows('categories'), products: readRows('products'), variants: readRows('product_variants'), zones: readRows('delivery_zones'),
   });
+  if (req.method === 'GET' && path === '/api/staff/delivery-list') {
+    const drivers = db.prepare("SELECT name,zone,departments FROM staff WHERE role='delivery' AND is_active=1 ORDER BY name").all().map((row) => ({ name: row.name, zone: row.zone || '', departments: JSON.parse(row.departments || '[]') }));
+    return send(res, 200, { drivers });
+  }
   if (req.method === 'POST' && path === '/api/staff/login') {
     const body = await bodyJson(req);
     const address = req.socket.remoteAddress || 'local';
@@ -142,7 +155,7 @@ async function route(req, res) {
     }
     loginAttempts.delete(address);
     const token = randomBytes(32).toString('base64url');
-    const user = { role: row.role, name: row.name, badgeId: row.id, assignedZone: row.zone || undefined };
+    const user = { role: row.role, name: row.name, badgeId: row.id, assignedZone: row.zone || undefined, assignedDepartments: JSON.parse(row.departments || '[]'), phone: row.phone || undefined, licensePlate: row.license_plate || undefined };
     sessions.set(token, user);
     const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
     return send(res, 200, { user }, { 'set-cookie': `olaice_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure}` });
@@ -164,7 +177,7 @@ async function route(req, res) {
     const storedOrder = db.prepare('SELECT data FROM orders WHERE id=?').get(orderId);
     const voiceFile = storedOrder ? JSON.parse(storedOrder.data).customer_voice_note_file : undefined;
     if (!order || !voiceFile) return send(res, 404, { error: 'Note vocale introuvable.' });
-    if (staff.role === 'delivery' && (!['READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'FAILED_DELIVERY'].includes(order.order_status) || order.delivery_agent_name && order.delivery_agent_name !== staff.name)) return send(res, 403, { error: 'Accès à cette note vocale refusé.' });
+    if (staff.role === 'delivery' && (!['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'DELIVERED', 'FAILED_DELIVERY'].includes(order.order_status) || order.delivery_agent_id !== staff.badgeId)) return send(res, 403, { error: 'Accès à cette note vocale refusé.' });
     const filename = voiceFile;
     const safeName = filename.split(/[\\/]/).pop();
     const audioPath = resolve(dataDir, 'audio-notes', safeName);
@@ -180,14 +193,22 @@ async function route(req, res) {
   if (req.method === 'GET' && path === '/api/orders') {
     const staff = staffFrom(req);
     if (!staff) return send(res, 401, { error: 'Connexion du personnel requise.' });
-    const ids = db.prepare(staff.role === 'admin' ? 'SELECT id FROM orders ORDER BY placed_at DESC' : 'SELECT id FROM orders WHERE order_status IN (\'READY\',\'OUT_FOR_DELIVERY\') AND (delivery_agent_name=? OR delivery_agent_name IS NULL) ORDER BY placed_at DESC').all(...(staff.role === 'admin' ? [] : [staff.name]));
-    return send(res, 200, { orders: ids.map(({ id }) => loadOrder(id)) });
+    const ids = staff.role === 'admin'
+      ? db.prepare('SELECT id FROM orders ORDER BY placed_at DESC').all()
+      : db.prepare("SELECT id FROM orders WHERE order_status='READY' OR json_extract(data,'$.delivery_agent_id')=? ORDER BY placed_at DESC").all(staff.badgeId);
+    const orders = ids.map(({ id }) => loadOrder(id)).filter((order) => {
+      if (staff.role === 'admin') return true;
+      if (order.delivery_agent_id === staff.badgeId) return true;
+      return order.order_status === 'READY' && (order.delivery_candidate_ids || []).includes(staff.badgeId);
+    });
+    return send(res, 200, { orders });
   }
   if (req.method === 'POST' && path === '/api/orders') {
     const body = await bodyJson(req);
     if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 50) return send(res, 400, { error: 'Votre panier est vide ou invalide.' });
     if (!String(body.customer_name || '').trim() || String(body.customer_phone || '').replace(/\D/g, '').length < 8 || !String(body.delivery_address || '').trim()) return send(res, 400, { error: 'Nom, téléphone et adresse sont obligatoires.' });
     if (body.order_type && !['standard','wholesale','event'].includes(body.order_type)) return send(res, 400, { error: 'Type de commande invalide.' });
+    if (body.customer_confirmation?.method !== 'press_hold' || !Number.isFinite(body.customer_confirmation?.hold_duration_ms) || body.customer_confirmation.hold_duration_ms < 5000) return send(res, 400, { error: 'Confirmez la commande en maintenant le bouton pendant cinq secondes.' });
     const voicePayload = body.customer_voice_note;
     let voiceBuffer, voiceExtension, voiceMime;
     if (voicePayload) {
@@ -210,6 +231,7 @@ async function route(req, res) {
     }
     const id = randomUUID();
     const placedAt = new Date().toISOString();
+    const customerConfirmedAt = new Date().toISOString();
     const datePart = placedAt.slice(0, 10).replaceAll('-', '');
     let order;
     let voicePath;
@@ -247,14 +269,20 @@ async function route(req, res) {
       const serverDistance = hasGpsCoordinates ? distanceMeters(body.customer_latitude, body.customer_longitude) : undefined;
       const deliveryFee = serverDistance === undefined ? zone.delivery_fee : distanceFee(serverDistance);
       if (!Number.isSafeInteger(deliveryFee) || deliveryFee < 0) throw new Error('Frais de livraison invalides.');
+      const departmentCode = body.delivery_location?.department_code;
+      const matchingDrivers = matchingDeliveryStaff(departmentCode);
       const code = `OLA-${datePart}-${randomBytes(3).toString('hex').toUpperCase()}`;
       order = {
         id, customer_id: body.customer_id, order_number: code, order_type: body.order_type || (normalSubtotal > subtotal ? 'wholesale' : 'standard'), customer_name: String(body.customer_name).trim(), customer_phone: String(body.customer_phone).trim(), customer_email: body.customer_email || undefined,
         delivery_zone_id: zone?.id || 'zone-gps', delivery_zone_name: zone?.name || 'Livraison mesurée par GPS', delivery_address: String(body.delivery_address).trim(), delivery_landmark: body.delivery_landmark || undefined,
         delivery_location: body.delivery_location || undefined, customer_voice_note_available: Boolean(voicePath), customer_voice_note_file: voicePath ? `${id}.${voiceExtension}` : undefined,
+        delivery_assignment_status: matchingDrivers.length === 0 ? 'unmatched' : matchingDrivers.length === 1 ? 'auto_assigned' : 'pending',
+        delivery_candidate_ids: matchingDrivers.map((driver) => driver.id),
+        ...(matchingDrivers.length === 1 ? { delivery_selected_agent_id: matchingDrivers[0].id, delivery_selected_agent_name: matchingDrivers[0].name } : {}),
         customer_latitude: body.customer_latitude, customer_longitude: body.customer_longitude, delivery_distance_meters: serverDistance, delivery_distance_text: serverDistance === undefined ? undefined : serverDistance < 1000 ? `${serverDistance} m` : `${(serverDistance / 1000).toFixed(2).replace('.', ',')} km`, delivery_fee_calculation_mode: serverDistance === undefined ? 'zone_fixed' : 'gps_distance',
         subtotal, delivery_fee: deliveryFee, discount_amount: normalSubtotal - subtotal, total: subtotal + deliveryFee, payment_method: 'cash_on_delivery', payment_status: 'pending', order_status: 'PENDING', customer_note: body.customer_note || undefined,
-        placed_at: placedAt, items, status_history: [{ id: randomUUID(), order_id: id, to_status: 'PENDING', changed_by: 'Client Web', comment: 'Commande passée en ligne — paiement à la livraison.', created_at: placedAt }],
+        customer_confirmed_at: customerConfirmedAt, customer_confirmation_method: 'press_hold', customer_confirmation_hold_ms: Math.round(body.customer_confirmation.hold_duration_ms),
+        placed_at: placedAt, items, status_history: [{ id: randomUUID(), order_id: id, to_status: 'PENDING', changed_by: 'Client Web', comment: 'Le client a confirmé consciemment la commande par un appui maintenu pendant cinq secondes. Paiement à la livraison.', created_at: customerConfirmedAt }],
       };
       db.prepare('INSERT INTO orders(id,order_number,customer_phone,order_status,placed_at,data) VALUES(?,?,?,?,?,?)').run(id, order.order_number, order.customer_phone, order.order_status, placedAt, JSON.stringify(order));
       const saveMovement = db.prepare('INSERT INTO inventory_movements VALUES(?,?,?,?,?,?)');
@@ -289,11 +317,32 @@ async function route(req, res) {
     if (!match) return send(res, 404, { error: 'Commande introuvable. Vérifiez le numéro de commande et le téléphone.' });
     return send(res, 200, { order: loadOrder(match.id) });
   }
-  if (path.startsWith('/api/admin/') || path.startsWith('/api/staff/') || req.method === 'PATCH' && path.startsWith('/api/orders/') && path.endsWith('/status')) {
+  if (path.startsWith('/api/admin/') || path.startsWith('/api/staff/') || req.method === 'PATCH' && path.startsWith('/api/orders/') && path.endsWith('/status') || req.method === 'POST' && path.startsWith('/api/orders/') && path.endsWith('/claim')) {
     const staff = staffFrom(req);
     if (!staff) return send(res, 401, { error: 'Connexion du personnel requise.' });
     const isOrderStatusUpdate = req.method === 'PATCH' && path.startsWith('/api/orders/') && path.endsWith('/status');
-    if (staff.role !== 'admin' && !isOrderStatusUpdate) return send(res, 403, { error: 'Accès réservé à la direction.' });
+    const claimRoute = path.match(/^\/api\/orders\/([^/]+)\/claim$/);
+    if (staff.role !== 'admin' && !isOrderStatusUpdate && !(staff.role === 'delivery' && claimRoute && req.method === 'POST')) return send(res, 403, { error: 'Accès réservé à la direction.' });
+    if (claimRoute && req.method === 'POST') {
+      if (staff.role !== 'delivery') return send(res, 403, { error: 'Seul un livreur peut accepter une course.' });
+      const orderId = decodeURIComponent(claimRoute[1]);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const order = loadOrder(orderId);
+        if (!order) { db.exec('ROLLBACK'); return send(res, 404, { error: 'Commande introuvable.' }); }
+        if (order.order_status !== 'READY') { db.exec('ROLLBACK'); return send(res, 409, { error: 'Cette course vient déjà d’être acceptée ou n’est pas encore prête.' }); }
+        const isEligible = order.delivery_agent_id === staff.badgeId || (order.delivery_candidate_ids || []).includes(staff.badgeId);
+        if (!isEligible || !(staff.assignedDepartments || []).includes(order.delivery_location?.department_code)) { db.exec('ROLLBACK'); return send(res, 403, { error: 'Cette commande ne relève pas de vos départements de livraison.' }); }
+        const nextAt = new Date().toISOString();
+        const updated = { ...order, order_status: 'ASSIGNED', delivery_assignment_status: 'accepted', delivery_agent_id: staff.badgeId, delivery_agent_name: staff.name, delivery_agent_phone: staff.phone || undefined, delivery_agent_plate: staff.licensePlate || undefined, delivery_assigned_at: nextAt };
+        const history = { id: randomUUID(), order_id: orderId, from_status: 'READY', to_status: 'ASSIGNED', changed_by: staff.name, comment: `${staff.name} a accepté la course.`, created_at: nextAt };
+        updated.status_history.push(history);
+        db.prepare('UPDATE orders SET order_status=?,data=? WHERE id=?').run('ASSIGNED', JSON.stringify(updated), orderId);
+        db.prepare('INSERT INTO order_status_histories(id,order_id,created_at,data) VALUES(?,?,?,?)').run(history.id, orderId, nextAt, JSON.stringify(history));
+        db.exec('COMMIT');
+        return send(res, 200, { order: updated });
+      } catch (error) { db.exec('ROLLBACK'); return send(res, 500, { error: 'La course n’a pas pu être acceptée.' }); }
+    }
     if (req.method === 'GET' && path === '/api/admin/customers') return send(res, 200, { customers: readRows('customers').map((customer) => ({ ...customer, is_active: customer.is_active ?? true })) });
     if (req.method === 'POST' && path === '/api/admin/customers') {
       const body = await bodyJson(req);
@@ -334,7 +383,7 @@ async function route(req, res) {
       return send(res, 200, { customer });
     }
     if (req.method === 'GET' && path === '/api/admin/staff') {
-      const staffList = db.prepare('SELECT id,name,role,zone,is_active FROM staff ORDER BY role,name').all().map((row) => ({ id: row.id, name: row.name, role: row.role, zone: row.zone || '', is_active: Boolean(row.is_active) }));
+      const staffList = db.prepare('SELECT id,name,role,zone,is_active,departments,phone,license_plate FROM staff ORDER BY role,name').all().map((row) => ({ id: row.id, name: row.name, role: row.role, zone: row.zone || '', departments: JSON.parse(row.departments || '[]'), phone: row.phone || '', licensePlate: row.license_plate || '', is_active: Boolean(row.is_active) }));
       return send(res, 200, { staff: staffList });
     }
     if ((req.method === 'POST' && path === '/api/admin/staff') || (req.method === 'PUT' && path.startsWith('/api/admin/staff/'))) {
@@ -352,9 +401,14 @@ async function route(req, res) {
       if (duplicate) return send(res, 409, { error: 'Ce nom est déjà attribué à un compte du personnel.' });
       let pinSalt = existing?.pin_salt, pinHash = existing?.pin_hash;
       if (pin) { pinSalt = randomBytes(16).toString('hex'); pinHash = scryptSync(pin, pinSalt, 64).toString('hex'); }
-      if (creating) db.prepare('INSERT INTO staff(id,name,role,zone,pin_salt,pin_hash,is_active) VALUES(?,?,?,?,?,?,1)').run(id, name, role, String(row.zone || '').trim() || null, pinSalt, pinHash);
-      else db.prepare('UPDATE staff SET name=?,role=?,zone=?,pin_salt=?,pin_hash=?,is_active=? WHERE id=?').run(name, role, String(row.zone || '').trim() || null, pinSalt, pinHash, row.is_active === false ? 0 : 1, id);
-      return send(res, creating ? 201 : 200, { staff: { id, name, role, zone: row.zone || '', is_active: row.is_active !== false } });
+      const departments = Array.isArray(row.departments) ? [...new Set(row.departments.map((value) => String(value).trim()).filter(Boolean))] : [];
+      const phone = String(row.phone || '').trim();
+      const licensePlate = String(row.licensePlate || '').trim();
+      if (role === 'delivery' && !departments.length) return send(res, 400, { error: 'Sélectionnez au moins un département de livraison pour ce livreur.' });
+      if (role === 'delivery' && (!phone || !licensePlate)) return send(res, 400, { error: 'Le téléphone et la plaque du livreur sont requis pour informer le client.' });
+      if (creating) db.prepare('INSERT INTO staff(id,name,role,zone,pin_salt,pin_hash,is_active,departments,phone,license_plate) VALUES(?,?,?,?,?,?,1,?,?,?)').run(id, name, role, String(row.zone || '').trim() || null, pinSalt, pinHash, JSON.stringify(departments), phone || null, licensePlate || null);
+      else db.prepare('UPDATE staff SET name=?,role=?,zone=?,pin_salt=?,pin_hash=?,is_active=?,departments=?,phone=?,license_plate=? WHERE id=?').run(name, role, String(row.zone || '').trim() || null, pinSalt, pinHash, row.is_active === false ? 0 : 1, JSON.stringify(departments), phone || null, licensePlate || null, id);
+      return send(res, creating ? 201 : 200, { staff: { id, name, role, zone: row.zone || '', departments, phone, licensePlate, is_active: row.is_active !== false } });
     }
     const staffDeleteRoute = path.match(/^\/api\/admin\/staff\/([^/]+)$/);
     if (staffDeleteRoute && req.method === 'DELETE') {
@@ -400,15 +454,27 @@ async function route(req, res) {
       const body = await bodyJson(req);
       const current = loadOrder(orderId);
       if (!current) return send(res, 404, { error: 'Commande introuvable.' });
-      if (staff.role === 'delivery' && !['READY','OUT_FOR_DELIVERY'].includes(current.order_status)) return send(res, 403, { error: 'Cette commande ne fait pas partie de votre tournée.' });
-      if (staff.role === 'delivery' && current.delivery_agent_name && current.delivery_agent_name !== staff.name) return send(res, 403, { error: 'Cette commande est attribuée à un autre livreur.' });
-      if (staff.role === 'delivery' && !['OUT_FOR_DELIVERY','DELIVERED','FAILED_DELIVERY'].includes(body.status)) return send(res, 403, { error: 'Action non autorisée pour un livreur.' });
-      const graph = { PENDING: ['CONFIRMED','CANCELLED'], CONFIRMED: ['PREPARING','CANCELLED'], PREPARING: ['READY','CANCELLED'], READY: ['OUT_FOR_DELIVERY','CANCELLED'], OUT_FOR_DELIVERY: ['DELIVERED','FAILED_DELIVERY'], DELIVERED: [], CANCELLED: [], FAILED_DELIVERY: [] };
+      if (staff.role === 'delivery' && !['ASSIGNED','PICKED_UP','OUT_FOR_DELIVERY'].includes(current.order_status)) return send(res, 403, { error: 'Cette commande ne fait pas partie de votre tournée.' });
+      if (staff.role === 'delivery' && current.delivery_agent_id !== staff.badgeId) return send(res, 403, { error: 'Cette commande est attribuée à un autre livreur.' });
+      if (staff.role === 'delivery' && !['PICKED_UP','OUT_FOR_DELIVERY','DELIVERED','FAILED_DELIVERY'].includes(body.status)) return send(res, 403, { error: 'Action non autorisée pour un livreur.' });
+      const graph = { PENDING: ['CONFIRMED','CANCELLED'], CONFIRMED: ['PREPARING','CANCELLED'], PREPARING: ['READY','CANCELLED'], READY: ['ASSIGNED','CANCELLED'], ASSIGNED: ['PICKED_UP'], PICKED_UP: ['OUT_FOR_DELIVERY'], OUT_FOR_DELIVERY: ['DELIVERED','FAILED_DELIVERY'], DELIVERED: [], CANCELLED: [], FAILED_DELIVERY: [] };
       if (!graph[current.order_status]?.includes(body.status)) return send(res, 409, { error: `Transition impossible : ${current.order_status} → ${body.status}.` });
       const nextAt = new Date().toISOString();
       db.exec('BEGIN IMMEDIATE');
       try {
         const updated = { ...current, order_status: body.status };
+        if (body.status === 'READY') {
+          const eligible = matchingDeliveryStaff(current.delivery_location?.department_code);
+          updated.delivery_candidate_ids = eligible.map((driver) => driver.id);
+          updated.delivery_assignment_status = eligible.length === 0 ? 'unmatched' : eligible.length === 1 ? 'auto_assigned' : 'offered';
+          if (eligible.length === 1) {
+            updated.delivery_selected_agent_id = eligible[0].id;
+            updated.delivery_selected_agent_name = eligible[0].name;
+          } else if (eligible.length !== 1 && updated.delivery_assignment_status !== 'accepted') {
+            updated.delivery_selected_agent_id = undefined; updated.delivery_selected_agent_name = undefined;
+            updated.delivery_agent_id = undefined; updated.delivery_agent_name = undefined; updated.delivery_agent_phone = undefined; updated.delivery_agent_plate = undefined;
+          }
+        }
         if (staff.role === 'delivery' && body.status === 'OUT_FOR_DELIVERY') updated.delivery_agent_name = staff.name;
         else if (body.agent_name && staff.role === 'admin') updated.delivery_agent_name = body.agent_name;
         if (body.status === 'CONFIRMED') updated.confirmed_at = nextAt;

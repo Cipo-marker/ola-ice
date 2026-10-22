@@ -1,5 +1,5 @@
 export type StaffRole = 'admin' | 'delivery' | 'none';
-export interface StaffUser { role: StaffRole; name: string; badgeId: string; assignedZone?: string; }
+export interface StaffUser { role: StaffRole; name: string; badgeId: string; assignedZone?: string; assignedDepartments?: string[]; phone?: string; licensePlate?: string; }
 export const REGISTERED_DRIVERS = [
   { name: 'Koffi (Moto Express 01)', zone: 'Cotonou Centre & Littoral' },
   { name: 'Moussa (Moto Express 02)', zone: 'Calavi & Godomey' },

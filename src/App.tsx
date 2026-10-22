@@ -646,6 +646,7 @@ export default function App() {
         <CustomerAuthModal
           isOpen={customerAuthOpen}
           onClose={() => setCustomerAuthOpen(false)}
+          onAdminLogin={() => { setCustomerAuthOpen(false); handleOpenStaffLogin('admin'); }}
           onSuccess={(c) => {
             setCustomer(c);
             setCustomerAuthOpen(false);

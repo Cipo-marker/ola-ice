@@ -148,6 +148,41 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const holdTimeoutRef = useRef<number | null>(null);
+  const holdIntervalRef = useRef<number | null>(null);
+  const holdStartedAtRef = useRef<number | null>(null);
+  const holdCompletedRef = useRef(false);
+  const [holdProgress, setHoldProgress] = useState(0);
+
+  const clearOrderHold = () => {
+    if (holdTimeoutRef.current !== null) window.clearTimeout(holdTimeoutRef.current);
+    if (holdIntervalRef.current !== null) window.clearInterval(holdIntervalRef.current);
+    holdTimeoutRef.current = null;
+    holdIntervalRef.current = null;
+    holdStartedAtRef.current = null;
+    holdCompletedRef.current = false;
+    setHoldProgress(0);
+  };
+
+  const startOrderHold = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (isSubmitting || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    event.preventDefault();
+    clearOrderHold();
+    holdCompletedRef.current = false;
+    holdStartedAtRef.current = Date.now();
+    holdIntervalRef.current = window.setInterval(() => {
+      const elapsed = Date.now() - (holdStartedAtRef.current || Date.now());
+      setHoldProgress(Math.min(100, elapsed / 50));
+    }, 50);
+    holdTimeoutRef.current = window.setTimeout(() => {
+      if (holdIntervalRef.current !== null) window.clearInterval(holdIntervalRef.current);
+      holdIntervalRef.current = null;
+      holdTimeoutRef.current = null;
+      setHoldProgress(100);
+      holdCompletedRef.current = true;
+      formRef.current?.requestSubmit();
+    }, 5000);
+  };
 
   // Quick inline login accordion for returning customers
   const [showQuickLogin, setShowQuickLogin] = useState(false);
@@ -266,6 +301,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    if (!holdCompletedRef.current) {
+      setErrorMessage('Maintenez le bouton de confirmation pendant cinq secondes pour valider la commande.');
+      return;
+    }
+    holdCompletedRef.current = false;
 
     // Validation checks
     if (pricing.itemCount === 0) {
@@ -369,6 +409,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         order_type: orderType,
         customer_note: customerNote.trim() || undefined,
         customer_voice_note: voiceNote,
+        customer_confirmation: { method: 'press_hold', hold_duration_ms: 5000, confirmed_at: new Date().toISOString() },
         custom_delivery_fee: distanceResult ? distanceResult.deliveryFee : undefined,
         customer_latitude: customerCoords?.lat,
         customer_longitude: customerCoords?.lng,
@@ -1065,23 +1106,19 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             {/* Action submit button */}
             <div className="pt-1">
               <button
-                type="submit"
+                type="button"
                 disabled={isSubmitting}
-                className="w-full py-4 bg-rose-600 hover:bg-rose-700 disabled:bg-neutral-400 text-white font-bold rounded-2xl shadow-lg transition-all flex items-center justify-center gap-2 text-base active:scale-98 cursor-pointer disabled:cursor-not-allowed"
+                onPointerDown={startOrderHold}
+                onPointerUp={clearOrderHold}
+                onPointerLeave={clearOrderHold}
+                onPointerCancel={clearOrderHold}
+                onContextMenu={(event) => event.preventDefault()}
+                aria-label="Maintenez pour confirmer la commande pendant cinq secondes"
+                className="w-full touch-none select-none py-4 bg-rose-600 hover:bg-rose-700 disabled:bg-neutral-400 text-white font-bold rounded-2xl shadow-lg transition-all flex items-center justify-center gap-2 text-base active:scale-98 cursor-pointer disabled:cursor-not-allowed"
               >
-                {isSubmitting ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Validation de votre commande...</span>
-                  </>
-                ) : (
-                  <>
-                    <ShieldCheck className="w-5 h-5" />
-                    <span>Confirmer ma commande (Paiement à la livraison)</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
+                {isSubmitting ? <><Loader2 className="w-5 h-5 animate-spin" /><span>Validation de votre commande...</span></> : <><ShieldCheck className="w-5 h-5" /><span>{holdProgress > 0 ? `Maintenez… ${Math.min(5, holdProgress / 20).toFixed(1)} s / 5 s` : 'Maintenez 5 secondes pour confirmer ma commande'}</span></>}
               </button>
+              {!isSubmitting && <div className="h-1.5 overflow-hidden rounded-full bg-rose-100"><div className="h-full bg-rose-600 transition-[width] duration-75" style={{ width: `${holdProgress}%` }} /></div>}
               <div className="flex items-center justify-center gap-2 text-[11px] text-neutral-500 pt-2">
                 <Banknote className="w-3.5 h-3.5 text-emerald-600" />
                 <span>Paiement 100% en espèces à la livraison par notre coursier moto</span>
