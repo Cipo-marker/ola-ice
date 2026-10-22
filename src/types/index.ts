@@ -59,6 +59,18 @@ export interface DeliveryZone {
   minimum_order: number;
   estimated_duration: string;
   is_active: boolean;
+  location?: Partial<BeninLocation>;
+}
+
+export interface BeninLocation {
+  department_code: string;
+  department_name: string;
+  commune_code: string;
+  commune_name: string;
+  arrondissement_code: string;
+  arrondissement_name: string;
+  quarter_code: string;
+  quarter_name: string;
 }
 
 export interface CartItem {
@@ -102,6 +114,7 @@ export interface CustomerProfile {
   deliveryZoneName?: string;
   deliveryAddress?: string;
   deliveryLandmark?: string;
+  deliveryLocation?: BeninLocation;
   latitude?: number;
   longitude?: number;
   distanceMeters?: number;
@@ -110,6 +123,7 @@ export interface CustomerProfile {
   locationConfirmed?: boolean;
   workAddress?: string;
   workLandmark?: string;
+  workLocation?: BeninLocation;
   workLatitude?: number;
   workLongitude?: number;
   workDistanceMeters?: number;
@@ -118,6 +132,15 @@ export interface CustomerProfile {
   notes?: string;
   createdAt: string;
   lastActiveAt: string;
+  is_active?: boolean;
+}
+
+export interface StaffAccount {
+  id: string;
+  name: string;
+  role: 'admin' | 'delivery';
+  zone: string;
+  is_active: boolean;
 }
 
 export interface Order {
@@ -132,6 +155,7 @@ export interface Order {
   delivery_zone_name: string;
   delivery_address: string;
   delivery_landmark?: string;
+  delivery_location?: BeninLocation;
   customer_latitude?: number;
   customer_longitude?: number;
   delivery_distance_meters?: number;
@@ -146,6 +170,7 @@ export interface Order {
   order_status: OrderStatus;
   delivery_agent_name?: string;
   customer_note?: string;
+  customer_voice_note_available?: boolean;
   admin_note?: string;
   placed_at: string;
   confirmed_at?: string;

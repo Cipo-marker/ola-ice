@@ -471,6 +471,14 @@ export const DeliveryAgentView: React.FC<DeliveryAgentViewProps> = ({
                       Note client : « {order.customer_note} »
                     </div>
                   )}
+                  {order.customer_voice_note_available && (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 space-y-1.5">
+                      <div className="text-[11px] font-bold text-rose-900">Écouter le repère vocal de la maison</div>
+                      <audio controls preload="none" className="h-10 w-full" src={`/api/orders/${encodeURIComponent(order.id)}/voice-note`}>
+                        Votre navigateur ne peut pas lire cette note vocale.
+                      </audio>
+                    </div>
+                  )}
                 </div>
 
                 {/* LIVE COURIER vs CUSTOMER MAP SECTION */}

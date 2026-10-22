@@ -120,7 +120,7 @@ export const DeliveryDistanceMap: React.FC<DeliveryDistanceMapProps> = ({
         interactive ? 'ring-2 ring-rose-500/50 cursor-crosshair' : ''
       }`}
     >
-      {apiKey ? <APIProvider apiKey={apiKey} libraries={['marker', 'geometry']}>
+      {apiKey ? <APIProvider apiKey={apiKey} libraries={['marker', 'geometry', 'places']}>
         <Map
           defaultCenter={center}
           defaultZoom={zoom}

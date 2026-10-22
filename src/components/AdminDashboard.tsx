@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { store } from '../services/store';
-import { Order, OrderStatus, Product, ProductVariant, DeliveryZone } from '../types';
+import { Category, CustomerProfile, Order, OrderStatus, Product, ProductVariant, DeliveryZone, StaffAccount } from '../types';
+import { BeninLocationSelector } from './BeninLocationSelector';
 import {
   TrendingUp,
   ShoppingBag,
@@ -21,8 +22,12 @@ import {
   Lock,
   LogOut,
   ShieldCheck,
+  Plus,
+  Pencil,
+  Archive,
 } from 'lucide-react';
 import { authService } from '../services/auth';
+import { popupQueueService } from '../services/popupQueueService';
 
 interface AdminDashboardProps {
   onOpenLogin?: () => void;
@@ -54,20 +59,34 @@ const STATUS_CONFIG: Record<
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onLogout }) => {
   const isAdmin = authService.isAdmin();
 
-  const [activeTab, setActiveTab] = useState<'orders' | 'products' | 'zones' | 'customers'>('orders');
+  const [activeTab, setActiveTab] = useState<'orders' | 'products' | 'categories' | 'zones' | 'customers' | 'staff' | 'popups'>('orders');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [, setStoreRevision] = useState(0);
 
   // Edit variant & zone modal state
   const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null);
   const [editingZone, setEditingZone] = useState<DeliveryZone | null>(null);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [editingCustomer, setEditingCustomer] = useState<CustomerProfile | null>(null);
+  const [editingStaff, setEditingStaff] = useState<(Partial<StaffAccount> & { pin?: string }) | null>(null);
 
   const orders = store.getOrders();
-  const products = store.getProducts();
+  const products = store.getAllProducts();
+  const categories = store.getAllCategories();
   const zones = store.getAllZones();
   const customers = store.getCustomers();
+  const staff = store.getStaff();
+
+  useEffect(() => {
+    const unsubscribe = store.subscribe(() => setStoreRevision((revision) => revision + 1));
+    void store.refreshCustomers().catch(() => undefined);
+    void store.refreshStaff().catch(() => undefined);
+    return unsubscribe;
+  }, []);
 
   if (!isAdmin) {
     return (
@@ -156,6 +175,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
     } catch (error) {
       showToast(`⚠️ ${error instanceof Error ? error.message : 'Enregistrement impossible.'}`);
     }
+  };
+
+  const handleSaveProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProduct) return;
+    try { await store.updateProduct(editingProduct); setEditingProduct(null); showToast('✓ Produit enregistré.'); }
+    catch (error) { showToast(`⚠️ ${error instanceof Error ? error.message : 'Enregistrement impossible.'}`); }
+  };
+
+  const handleSaveCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCategory) return;
+    try { await store.updateCategory(editingCategory); setEditingCategory(null); showToast('✓ Catégorie enregistrée.'); }
+    catch (error) { showToast(`⚠️ ${error instanceof Error ? error.message : 'Enregistrement impossible.'}`); }
+  };
+
+  const handleSaveCustomer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCustomer) return;
+    try { if (editingCustomer.id) await store.updateCustomer(editingCustomer); else await store.createCustomer({ fullName: editingCustomer.fullName, phone: editingCustomer.phone, email: editingCustomer.email }); setEditingCustomer(null); showToast('✓ Fiche client enregistrée.'); }
+    catch (error) { showToast(`⚠️ ${error instanceof Error ? error.message : 'Enregistrement impossible.'}`); }
+  };
+
+  const handleSaveStaff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingStaff?.name || !editingStaff.role) return;
+    try { await store.saveStaff({ ...editingStaff, name: editingStaff.name, role: editingStaff.role, zone: editingStaff.zone || '' }); setEditingStaff(null); showToast('✓ Compte personnel enregistré.'); }
+    catch (error) { showToast(`⚠️ ${error instanceof Error ? error.message : 'Enregistrement impossible.'}`); }
   };
 
   const handleSaveZone = async (e: React.FormEvent) => {
@@ -287,6 +334,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
           Produits, Tarifs & Stocks ({products.length})
         </button>
         <button
+          onClick={() => setActiveTab('categories')}
+          className={`px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 ${activeTab === 'categories' ? 'border-rose-600 text-rose-600' : 'border-transparent text-neutral-500 hover:text-neutral-900'}`}
+        >
+          Catégories ({categories.length})
+        </button>
+        <button
           onClick={() => setActiveTab('zones')}
           className={`px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 ${
             activeTab === 'zones'
@@ -306,7 +359,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
         >
           Clients ({customers.length})
         </button>
+        <button
+          onClick={() => setActiveTab('staff')}
+          className={`px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 ${activeTab === 'staff' ? 'border-rose-600 text-rose-600' : 'border-transparent text-neutral-500 hover:text-neutral-900'}`}
+        >
+          Équipe ({staff.length})
+        </button>
+        <button
+          onClick={() => setActiveTab('popups')}
+          className={`px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 ${activeTab === 'popups' ? 'border-rose-600 text-rose-600' : 'border-transparent text-neutral-500 hover:text-neutral-900'}`}
+        >
+          Pop-ups & produits
+        </button>
       </div>
+
+      {activeTab === 'popups' && (() => {
+        const campaign = popupQueueService.getAllCampaigns().find((item) => item.type === 'new_arrivals');
+        if (!campaign) return null;
+        const selected = campaign.featuredProductIds || [];
+        const toggle = (id: string) => popupQueueService.updateCampaign({
+          ...campaign,
+          featuredProductIds: selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id],
+        });
+        return <section className="space-y-4 rounded-2xl border border-neutral-200 bg-white p-4 sm:p-6 shadow-xs">
+          <div><h2 className="font-display text-lg font-black text-neutral-900">Produits du pop-up nouveautés</h2><p className="mt-1 text-sm text-neutral-500">Choisissez les produits qui apparaîtront. Les changements sont enregistrés dans ce navigateur et appliqués immédiatement.</p></div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {products.filter((product) => product.status === 'active').map((product) => <label key={product.id} className="flex cursor-pointer items-center gap-3 rounded-xl border border-neutral-200 p-3 hover:border-rose-300">
+              <input type="checkbox" checked={selected.includes(product.id)} onChange={() => toggle(product.id)} className="h-4 w-4 accent-rose-600" />
+              {product.main_image && <img src={product.main_image} alt="" className="h-12 w-12 rounded-lg object-cover" />}
+              <span className="text-sm font-semibold text-neutral-800">{product.name}</span>
+            </label>)}
+          </div>
+          {selected.length === 0 && <p className="text-sm text-amber-700">Sélectionnez au moins un produit pour alimenter le pop-up.</p>}
+        </section>;
+      })()}
 
       {/* Tab 1: Orders Management */}
       {activeTab === 'orders' && (
@@ -525,19 +611,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
         <div className="space-y-4">
           <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden shadow-xs">
             <div className="p-4 border-b border-neutral-200 bg-neutral-50 flex items-center justify-between">
-              <div>
+              <div className="flex w-full items-center justify-between gap-3">
+                <div>
                 <h3 className="font-display font-bold text-base text-neutral-900">
                   Catalogue Produits, Formats et Tarifs
                 </h3>
                 <p className="text-xs text-neutral-500">
                   Modifiez les prix unitaires, les tarifs de gros pour revendeuses et gérez les stocks physiques.
                 </p>
+                </div>
+                <button type="button" onClick={() => setEditingProduct({ id: crypto.randomUUID(), category_id: categories.find((item) => item.is_active !== false)?.id || '', name: '', slug: '', short_description: '', description: '', main_image: '', status: 'draft', is_featured: false, allow_wholesale: false, created_at: new Date().toISOString() })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700"><Plus className="h-4 w-4" />Ajouter un produit</button>
               </div>
             </div>
 
             <div className="divide-y divide-neutral-100">
               {products.map((product) => {
-                const variants = store.getVariantsForProduct(product.id);
+                const variants = store.getAllVariantsForProduct(product.id);
                 return (
                   <div key={product.id} className="p-4 space-y-3">
                     <div className="flex items-center justify-between">
@@ -561,13 +650,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                           Éligible Gros
                         </span>
                       )}
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-bold ${product.status === 'active' ? 'text-emerald-700' : 'text-neutral-500'}`}>{product.status === 'active' ? 'En boutique' : product.status === 'archived' ? 'Archivé' : 'Brouillon'}</span>
+                        <button type="button" onClick={() => setEditingProduct({ ...product })} className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-[11px] font-bold text-neutral-700"><Pencil className="mr-1 inline h-3 w-3" />Modifier</button>
+                        {product.status === 'archived' ? <button type="button" onClick={() => setEditingProduct({ ...product, status: 'draft' })} className="text-[11px] font-bold text-sky-700">Réactiver</button> : <button type="button" onClick={() => { if (window.confirm(`Archiver « ${product.name} » ?`)) void store.archiveCatalog('product', product.id).then(() => showToast('Produit archivé.')).catch((error) => showToast(error.message)); }} className="text-[11px] font-bold text-neutral-500"><Archive className="mr-1 inline h-3 w-3" />Archiver</button>}
+                      </div>
                     </div>
 
                     {/* Variants list table */}
                     <div className="bg-neutral-50 rounded-xl p-3 border border-neutral-200">
-                      <div className="text-xs font-bold text-neutral-600 mb-2">
-                        Formats & Variantes configurés :
-                      </div>
+                      <div className="mb-2 flex items-center justify-between gap-2"><div className="text-xs font-bold text-neutral-600">Formats & Variantes configurés :</div><button type="button" onClick={() => setEditingVariant({ id: crypto.randomUUID(), product_id: product.id, name: '', sku: `SKU-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, price: 0, stock_quantity: 0, track_stock: true, is_active: true })} className="flex items-center gap-1 text-[11px] font-bold text-rose-700"><Plus className="h-3.5 w-3.5" />Ajouter un format</button></div>
                       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
                         {variants.map((variant) => (
                           <div
@@ -580,6 +672,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                                 {variant.price.toLocaleString('fr-FR')} F
                               </span>
                             </div>
+                            {!variant.is_active && <div className="text-[10px] font-bold text-neutral-400">Format désactivé</div>}
 
                             <div className="flex justify-between text-neutral-500 text-[11px]">
                               <span>Stock : {variant.stock_quantity} unités</span>
@@ -590,12 +683,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                               )}
                             </div>
 
-                            <button
-                              onClick={() => setEditingVariant({ ...variant })}
-                              className="w-full mt-1 py-1 text-center bg-neutral-100 hover:bg-neutral-200 rounded text-[11px] font-bold text-neutral-700 transition-colors"
-                            >
-                              Modifier Prix & Stock
-                            </button>
+                            <div className="flex gap-1"><button onClick={() => setEditingVariant({ ...variant })} className="mt-1 flex-1 rounded bg-neutral-100 py-1 text-center text-[11px] font-bold text-neutral-700 transition-colors hover:bg-neutral-200">Modifier</button>{variant.is_active ? <button type="button" onClick={() => { if (window.confirm(`Désactiver le format « ${variant.name} » ?`)) void store.archiveCatalog('variant', variant.id).then(() => showToast('Format désactivé.')); }} className="mt-1 rounded px-2 text-[11px] font-bold text-neutral-500">Désactiver</button> : <button type="button" onClick={() => void store.updateVariant({ ...variant, is_active: true }).then(() => showToast('Format réactivé.'))} className="mt-1 rounded px-2 text-[11px] font-bold text-sky-700">Réactiver</button>}</div>
                           </div>
                         ))}
                       </div>
@@ -608,16 +696,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
         </div>
       )}
 
+      {activeTab === 'categories' && (
+        <section className="space-y-4 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xs">
+          <div className="flex items-center justify-between gap-3"><div><h3 className="font-display text-base font-bold text-neutral-900">Catégories du catalogue</h3><p className="text-xs text-neutral-500">Créer, modifier ou désactiver une catégorie. Les produits liés restent conservés.</p></div><button type="button" onClick={() => setEditingCategory({ id: crypto.randomUUID(), name: '', slug: '', description: '', is_active: true, sort_order: categories.length + 1 })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white"><Plus className="h-4 w-4" />Ajouter</button></div>
+          <div className="divide-y divide-neutral-100">{categories.map((category) => <div key={category.id} className="flex items-center justify-between gap-3 py-3"><div><div className="font-semibold text-sm text-neutral-900">{category.name}</div><div className="text-xs text-neutral-500">{category.description}</div><div className="text-[10px] text-neutral-400">{category.is_active === false ? 'Désactivée' : 'Active'}</div></div><div className="flex items-center gap-2"><button type="button" onClick={() => setEditingCategory({ ...category })} className="rounded-lg border border-neutral-200 px-2.5 py-1.5 text-[11px] font-bold text-neutral-700"><Pencil className="mr-1 inline h-3 w-3" />Modifier</button>{category.is_active === false ? <button type="button" onClick={() => void store.updateCategory({ ...category, is_active: true }).then(() => showToast('Catégorie réactivée.'))} className="text-[11px] font-bold text-sky-700">Réactiver</button> : <button type="button" onClick={() => { if (window.confirm(`Désactiver la catégorie « ${category.name} » ?`)) void store.archiveCatalog('category', category.id).then(() => showToast('Catégorie désactivée.')); }} className="text-[11px] font-bold text-neutral-500"><Archive className="mr-1 inline h-3 w-3" />Désactiver</button>}</div></div>)}</div>
+        </section>
+      )}
+
       {/* Tab 3: Delivery Zones */}
       {activeTab === 'zones' && (
         <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden shadow-xs p-5 space-y-4">
-          <div>
+          <div className="flex items-center justify-between gap-3">
+            <div>
             <h3 className="font-display font-bold text-base text-neutral-900">
               Zones de Livraison Desservies
             </h3>
             <p className="text-xs text-neutral-500">
               Ajustez les frais de livraison et les délais moyens par secteur urbain.
             </p>
+            </div>
+            <button type="button" onClick={() => setEditingZone({ id: crypto.randomUUID(), name: '', delivery_fee: 0, minimum_order: 0, estimated_duration: '30 - 45 min', is_active: true })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white"><Plus className="h-4 w-4" />Ajouter</button>
           </div>
 
           <div className="grid sm:grid-cols-2 gap-3">
@@ -636,6 +734,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                   <Clock className="w-3.5 h-3.5 text-neutral-400" />
                   <span>Délai estimé : {zone.estimated_duration}</span>
                 </div>
+                {zone.location?.department_name && <div className="text-[11px] text-neutral-500">{zone.location.department_name} · {zone.location.commune_name} · {zone.location.arrondissement_name} · {zone.location.quarter_name}</div>}
                 <div className="pt-2 flex items-center justify-between">
                   <span
                     className={`font-semibold ${
@@ -648,8 +747,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                     onClick={() => setEditingZone({ ...zone })}
                     className="px-2.5 py-1 bg-white hover:bg-neutral-100 border border-neutral-200 rounded font-bold text-neutral-700 cursor-pointer"
                   >
-                    Changer tarif
+                    Modifier
                   </button>
+                  {zone.is_active ? <button type="button" onClick={() => { if (window.confirm(`Désactiver la zone « ${zone.name} » ?`)) void store.archiveCatalog('zone', zone.id).then(() => showToast('Zone désactivée.')); }} className="text-[11px] font-bold text-neutral-500"><Archive className="mr-1 inline h-3 w-3" />Désactiver</button> : <button type="button" onClick={() => void store.updateZone({ ...zone, is_active: true }).then(() => showToast('Zone réactivée.'))} className="text-[11px] font-bold text-sky-700">Réactiver</button>}
                 </div>
               </div>
             ))}
@@ -659,22 +759,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
 
       {activeTab === 'customers' && (
         <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden shadow-xs">
-          <div className="p-4 sm:p-5 border-b border-neutral-100">
+          <div className="p-4 sm:p-5 border-b border-neutral-100 flex items-center justify-between gap-3">
             <h3 className="font-display font-bold text-base text-neutral-900">Clients ayant passé commande</h3>
             <p className="text-xs text-neutral-500 mt-1">Les coordonnées restent visibles uniquement dans l’espace direction.</p>
+            <button type="button" onClick={() => setEditingCustomer({ id: '', fullName: '', phone: '', email: '', createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(), is_active: true })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white"><Plus className="h-4 w-4"/>Ajouter un client</button>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs min-w-[620px]">
               <thead className="bg-neutral-50 text-neutral-600 font-bold uppercase tracking-wider">
-                <tr><th className="p-3.5">Nom</th><th className="p-3.5">Téléphone</th><th className="p-3.5">Commandes</th><th className="p-3.5">Dernière activité</th></tr>
+                <tr><th className="p-3.5">Nom</th><th className="p-3.5">Téléphone</th><th className="p-3.5">Commandes</th><th className="p-3.5">Dernière activité</th><th>Actions</th></tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
-                {customers.length === 0 ? <tr><td colSpan={4} className="p-8 text-center text-neutral-400">Aucun client enregistré pour le moment.</td></tr> : customers.map((customer) => (
+                {customers.length === 0 ? <tr><td colSpan={5} className="p-8 text-center text-neutral-400">Aucun client enregistré pour le moment.</td></tr> : customers.map((customer) => (
                   <tr key={customer.id} className="hover:bg-neutral-50/70">
                     <td className="p-3.5 font-semibold text-neutral-900">{customer.fullName}</td>
                     <td className="p-3.5"><a className="text-sky-700 hover:underline" href={`tel:${customer.phone}`}>{customer.phone}</a></td>
                     <td className="p-3.5 tabular-nums">{orders.filter((order) => order.customer_id === customer.id).length}</td>
                     <td className="p-3.5 text-neutral-500">{new Date(customer.lastActiveAt || customer.createdAt).toLocaleDateString('fr-FR')}</td>
+                    <td className="p-3.5"><button type="button" onClick={() => setEditingCustomer({ ...customer })} className="mr-2 rounded-lg border border-neutral-200 px-2 py-1 font-bold"><Pencil className="inline h-3 w-3"/> Modifier</button>{customer.is_active === false ? <button type="button" onClick={() => void store.updateCustomer({ ...customer, is_active: true }).then(() => showToast('Client réactivé.'))} className="text-sky-700 font-bold">Réactiver</button> : <button type="button" onClick={() => { if (window.confirm(`Désactiver ${customer.fullName} ?`)) void store.archiveCustomer(customer.id).then(() => showToast('Client désactivé.')); }} className="text-neutral-500 font-bold"><Archive className="inline h-3 w-3"/> Désactiver</button>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -682,6 +784,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
           </div>
         </div>
       )}
+
+      {activeTab === 'staff' && <section className="space-y-4 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xs">
+        <div className="flex items-center justify-between gap-3"><div><h3 className="font-display text-base font-bold text-neutral-900">Comptes du personnel</h3><p className="text-xs text-neutral-500">Gérez les accès direction et livraison.</p></div><button type="button" onClick={() => setEditingStaff({ name: '', role: 'delivery', zone: '', is_active: true, pin: '' })} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white"><Plus className="h-4 w-4"/>Ajouter un compte</button></div>
+        <div className="divide-y divide-neutral-100">{staff.map((person) => <div key={person.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-semibold text-sm text-neutral-900">{person.name}</div><div className="text-xs text-neutral-500">{person.role === 'admin' ? 'Direction' : 'Livreur'}{person.zone ? ` · ${person.zone}` : ''} · {person.is_active ? 'Actif' : 'Désactivé'}</div></div><div className="flex items-center gap-2"><button type="button" onClick={() => setEditingStaff({ ...person, pin: '' })} className="rounded-lg border border-neutral-200 px-2.5 py-1.5 text-[11px] font-bold"><Pencil className="mr-1 inline h-3 w-3"/>Modifier</button>{person.is_active ? <button type="button" onClick={() => { if (window.confirm(`Désactiver le compte de ${person.name} ?`)) void store.archiveStaff(person.id).then(() => showToast('Compte désactivé.')); }} className="text-[11px] font-bold text-neutral-500"><Archive className="mr-1 inline h-3 w-3"/>Désactiver</button> : <button type="button" onClick={() => void store.saveStaff({ ...person, is_active: true }).then(() => showToast('Compte réactivé.'))} className="text-[11px] font-bold text-sky-700">Réactiver</button>}</div></div>)}</div>
+      </section>}
 
       {/* Selected Order Detail Modal */}
       {selectedOrder && (
@@ -814,11 +921,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                     Note client : "{selectedOrder.customer_note}"
                   </div>
                 )}
+                {selectedOrder.customer_voice_note_available && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 space-y-2">
+                    <div className="text-xs font-bold text-rose-900">Note vocale — repère de la maison</div>
+                    <audio controls preload="none" className="h-10 w-full" src={`/api/orders/${encodeURIComponent(selectedOrder.id)}/voice-note`}>
+                      Votre navigateur ne peut pas lire cette note vocale.
+                    </audio>
+                  </div>
+                )}
               </div>
 
               <div className="p-3.5 bg-neutral-50 rounded-xl border border-neutral-200 space-y-1.5">
                 <div className="font-bold text-neutral-900">Lieu de Livraison</div>
                 <div>Zone : <strong>{selectedOrder.delivery_zone_name}</strong></div>
+                {selectedOrder.delivery_location && <div>Localité : {selectedOrder.delivery_location.department_name} · {selectedOrder.delivery_location.commune_name} · {selectedOrder.delivery_location.arrondissement_name} · {selectedOrder.delivery_location.quarter_name}</div>}
                 <div>Adresse : {selectedOrder.delivery_address}</div>
                 {selectedOrder.delivery_landmark && (
                   <div className="font-semibold text-neutral-700">
@@ -894,6 +1010,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
         </div>
       )}
 
+      {editingProduct && <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 overflow-y-auto"><form onSubmit={handleSaveProduct} className="my-8 w-full max-w-xl space-y-3 rounded-2xl border border-neutral-200 bg-white p-5 shadow-2xl">
+        <div className="flex items-center justify-between"><h3 className="font-bold">{products.some((item) => item.id === editingProduct.id) ? 'Modifier' : 'Créer'} un produit</h3><button type="button" onClick={() => setEditingProduct(null)}><X className="h-4 w-4"/></button></div>
+        <label className="block text-xs font-semibold">Nom<input required value={editingProduct.name} onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value, slug: products.some((item) => item.id === editingProduct.id) ? editingProduct.slug : e.target.value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') })} className="mt-1 w-full rounded-lg border p-2 text-sm"/></label>
+        <label className="block text-xs font-semibold">Catégorie<select required value={editingProduct.category_id} onChange={(e) => setEditingProduct({ ...editingProduct, category_id: e.target.value })} className="mt-1 w-full rounded-lg border p-2 text-sm"><option value="">Choisir</option>{categories.filter((item) => item.is_active !== false).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label className="block text-xs font-semibold">Description courte<input value={editingProduct.short_description} onChange={(e) => setEditingProduct({ ...editingProduct, short_description: e.target.value })} className="mt-1 w-full rounded-lg border p-2 text-sm"/></label>
+        <label className="block text-xs font-semibold">Description<textarea value={editingProduct.description} onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })} className="mt-1 w-full rounded-lg border p-2 text-sm" rows={3}/></label>
+        <label className="block text-xs font-semibold">URL de l’image<input value={editingProduct.main_image} onChange={(e) => setEditingProduct({ ...editingProduct, main_image: e.target.value })} className="mt-1 w-full rounded-lg border p-2 text-sm"/></label>
+        <div className="grid grid-cols-2 gap-3"><label className="text-xs font-semibold">Statut<select value={editingProduct.status} onChange={(e) => setEditingProduct({ ...editingProduct, status: e.target.value as Product['status'] })} className="mt-1 w-full rounded-lg border p-2"><option value="draft">Brouillon</option><option value="active">En boutique</option><option value="archived">Archivé</option></select></label><label className="text-xs font-semibold">Saveurs (séparées par virgule)<input value={(editingProduct.available_flavors || []).join(', ')} onChange={(e) => setEditingProduct({ ...editingProduct, available_flavors: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} className="mt-1 w-full rounded-lg border p-2"/></label></div>
+        <div className="flex flex-wrap gap-4 text-xs"><label><input type="checkbox" checked={editingProduct.is_featured} onChange={(e) => setEditingProduct({ ...editingProduct, is_featured: e.target.checked })}/> Produit vedette</label><label><input type="checkbox" checked={editingProduct.allow_wholesale} onChange={(e) => setEditingProduct({ ...editingProduct, allow_wholesale: e.target.checked })}/> Vente en gros</label></div>
+        <button className="w-full rounded-xl bg-rose-600 py-2.5 text-sm font-bold text-white">Enregistrer le produit</button>
+      </form></div>}
+
+      {editingCategory && <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"><form onSubmit={handleSaveCategory} className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl"><div className="flex justify-between"><h3 className="font-bold">Catégorie</h3><button type="button" onClick={() => setEditingCategory(null)}><X className="h-4 w-4"/></button></div><label className="block text-xs font-semibold">Nom<input required value={editingCategory.name} onChange={(e) => { const name = e.target.value; setEditingCategory({ ...editingCategory, name, slug: categories.some((item) => item.id === editingCategory.id) ? editingCategory.slug : name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') }); }} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">Description<input value={editingCategory.description} onChange={(e) => setEditingCategory({ ...editingCategory, description: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">Ordre d’affichage<input type="number" min="0" value={editingCategory.sort_order} onChange={(e) => setEditingCategory({ ...editingCategory, sort_order: Number(e.target.value) })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="text-xs"><input type="checkbox" checked={editingCategory.is_active} onChange={(e) => setEditingCategory({ ...editingCategory, is_active: e.target.checked })}/> Catégorie active</label><button className="w-full rounded-xl bg-rose-600 py-2 font-bold text-white">Enregistrer</button></form></div>}
+
+      {editingCustomer && <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"><form onSubmit={handleSaveCustomer} className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl"><div className="flex justify-between"><h3 className="font-bold">Fiche client</h3><button type="button" onClick={() => setEditingCustomer(null)}><X className="h-4 w-4"/></button></div><label className="block text-xs font-semibold">Nom complet<input required value={editingCustomer.fullName} onChange={(e) => setEditingCustomer({ ...editingCustomer, fullName: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">Téléphone<input required value={editingCustomer.phone} onChange={(e) => setEditingCustomer({ ...editingCustomer, phone: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">E-mail<input type="email" value={editingCustomer.email || ''} onChange={(e) => setEditingCustomer({ ...editingCustomer, email: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="text-xs"><input type="checkbox" checked={editingCustomer.is_active !== false} onChange={(e) => setEditingCustomer({ ...editingCustomer, is_active: e.target.checked })}/> Compte client actif</label><button className="w-full rounded-xl bg-rose-600 py-2 font-bold text-white">Enregistrer</button></form></div>}
+
+      {editingStaff && <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"><form onSubmit={handleSaveStaff} className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl"><div className="flex justify-between"><h3 className="font-bold">Compte du personnel</h3><button type="button" onClick={() => setEditingStaff(null)}><X className="h-4 w-4"/></button></div><label className="block text-xs font-semibold">Nom<input required value={editingStaff.name || ''} onChange={(e) => setEditingStaff({ ...editingStaff, name: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">Rôle<select value={editingStaff.role || 'delivery'} onChange={(e) => setEditingStaff({ ...editingStaff, role: e.target.value as StaffAccount['role'] })} className="mt-1 w-full rounded-lg border p-2"><option value="delivery">Livreur</option><option value="admin">Direction</option></select></label><label className="block text-xs font-semibold">Zone de livraison<input value={editingStaff.zone || ''} onChange={(e) => setEditingStaff({ ...editingStaff, zone: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="block text-xs font-semibold">Code secret {editingStaff.id ? '(laisser vide pour conserver)' : '(6 caractères minimum)'}<input type="password" minLength={editingStaff.id ? 0 : 6} required={!editingStaff.id} value={editingStaff.pin || ''} onChange={(e) => setEditingStaff({ ...editingStaff, pin: e.target.value })} className="mt-1 w-full rounded-lg border p-2"/></label><label className="text-xs"><input type="checkbox" checked={editingStaff.is_active !== false} onChange={(e) => setEditingStaff({ ...editingStaff, is_active: e.target.checked })}/> Compte actif</label><button className="w-full rounded-xl bg-rose-600 py-2 font-bold text-white">Enregistrer</button></form></div>}
+
       {/* Edit Variant Modal */}
       {editingVariant && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -903,7 +1037,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
           >
             <div className="flex justify-between items-center border-b border-neutral-200 pb-2">
               <h3 className="font-bold text-sm text-neutral-900">
-                Modifier le Format : {editingVariant.name}
+                {store.getAllVariantsForProduct(editingVariant.product_id).some((item) => item.id === editingVariant.id) ? 'Modifier' : 'Créer'} un format : {editingVariant.name}
               </h3>
               <button
                 type="button"
@@ -915,6 +1049,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
             </div>
 
             <div className="space-y-3 text-xs">
+              <div><label className="font-semibold block mb-1">Nom du format :</label><input required value={editingVariant.name} onChange={(e) => setEditingVariant({ ...editingVariant, name: e.target.value })} className="w-full p-2.5 rounded-xl border border-neutral-300 text-sm" placeholder="Ex. Pot 250 ml"/></div>
+              <div><label className="font-semibold block mb-1">Référence SKU :</label><input required value={editingVariant.sku} onChange={(e) => setEditingVariant({ ...editingVariant, sku: e.target.value })} className="w-full p-2.5 rounded-xl border border-neutral-300 font-mono text-sm"/></div>
               <div>
                 <label className="font-semibold block mb-1">Prix Unitaire (Détail en F CFA) :</label>
                 <input
@@ -986,6 +1122,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                   />
                 </div>
               </div>
+              <label className="flex items-center gap-2 font-semibold"><input type="checkbox" checked={editingVariant.is_active} onChange={(e) => setEditingVariant({ ...editingVariant, is_active: e.target.checked })}/>Format actif à la vente</label>
             </div>
 
             <div className="flex gap-2 pt-2">
@@ -1043,6 +1180,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onOpenLogin, onL
                   required
                 />
               </div>
+
+              <BeninLocationSelector compact value={editingZone.location} onChange={(location) => setEditingZone({ ...editingZone, location: location || undefined })} />
+
+              <label className="flex items-center gap-2 text-xs font-semibold"><input type="checkbox" checked={editingZone.is_active} onChange={(event) => setEditingZone({ ...editingZone, is_active: event.target.checked })} />Zone active dans le parcours de commande</label>
 
               <div>
                 <label className="font-semibold block mb-1">Frais de livraison (en F CFA) :</label>

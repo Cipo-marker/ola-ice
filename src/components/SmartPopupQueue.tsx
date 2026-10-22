@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { store } from '../services/store';
 import { customerAuthService } from '../services/customerAuth';
+import { popupQueueService } from '../services/popupQueueService';
 import { CustomerProfile, Product } from '../types';
 import {
   X,
@@ -43,6 +44,8 @@ interface SmartPopupQueueProps {
 
 const SESSION_DISMISSED_ALL_KEY = 'olaice_popup_queue_muted_v1';
 const SEEN_POPUPS_KEY = 'olaice_seen_popups_v1';
+const PROMO_LAST_SHOWN_KEY = 'olaice_promo_last_shown_v1';
+const PROMO_SHOWN_SESSION_KEY = 'olaice_promo_shown_session_v1';
 
 export const SmartPopupQueue: React.FC<SmartPopupQueueProps> = ({
   customer,
@@ -104,6 +107,9 @@ export const SmartPopupQueue: React.FC<SmartPopupQueueProps> = ({
 
   // Quick-add feedback inside popups
   const [addedVariantId, setAddedVariantId] = useState<string | null>(null);
+  const [, setCampaignRevision] = useState(0);
+
+  useEffect(() => popupQueueService.subscribe(() => setCampaignRevision((revision) => revision + 1)), []);
 
   // Sync form fields when customer changes
   useEffect(() => {
@@ -133,19 +139,34 @@ export const SmartPopupQueue: React.FC<SmartPopupQueueProps> = ({
     }
 
     // Find the first unseen popup in the ordered queue
-    const nextUnseenIndex = queue.findIndex((id) => !seenIds.includes(id));
+    const promoAlreadyShown = (() => {
+      try {
+        if (sessionStorage.getItem(PROMO_SHOWN_SESSION_KEY) === 'true') return true;
+        const lastShown = Number(localStorage.getItem(PROMO_LAST_SHOWN_KEY) || 0);
+        return Date.now() - lastShown < 24 * 60 * 60 * 1000;
+      } catch { return false; }
+    })();
+    const nextUnseenIndex = queue.findIndex((id) => !seenIds.includes(id) && (id === 'profile_completion' || !promoAlreadyShown));
     if (nextUnseenIndex === -1) {
       return; // All popups in queue have been presented once automatically
     }
 
     // Wait a polite delay before showing the next queued popup
-    // 2.2s for the very first popup, 7.5s cooldown between subsequent popups in the queue
-    const delayMs = seenIds.length === 0 ? 2200 : 7500;
+    // Let an incomplete profile prompt appear early; promotions wait longer and
+    // are limited to one per session and one per day across sessions.
+    const nextId = queue[nextUnseenIndex];
+    const delayMs = nextId === 'profile_completion' ? 5000 : 60000;
 
     const timer = window.setTimeout(() => {
       if (!isExternalModalOpen) {
         setCurrentIndex(nextUnseenIndex);
         setIsVisible(true);
+        if (nextId !== 'profile_completion') {
+          try {
+            sessionStorage.setItem(PROMO_SHOWN_SESSION_KEY, 'true');
+            localStorage.setItem(PROMO_LAST_SHOWN_KEY, String(Date.now()));
+          } catch { /* storage may be unavailable */ }
+        }
       }
     }, delayMs);
 
@@ -242,13 +263,7 @@ export const SmartPopupQueue: React.FC<SmartPopupQueueProps> = ({
 
     window.setTimeout(() => {
       setProfileSavedSuccess(false);
-      // Smoothly transition to the Charcoal Promo popup next in queue!
-      const charcoalIdx = queue.indexOf('charcoal_promo');
-      if (charcoalIdx !== -1) {
-        setCurrentIndex(charcoalIdx);
-      } else {
-        setIsVisible(false);
-      }
+      setIsVisible(false);
     }, 1100);
   };
 
@@ -258,11 +273,9 @@ export const SmartPopupQueue: React.FC<SmartPopupQueueProps> = ({
     ? store.getVariantsForProduct(charcoalProduct.id)
     : [];
 
-  const showcaseProducts = [
-    store.getProductById('prod-jolof-rice'),
-    store.getProductById('prod-shawarma'),
-    store.getProductById('prod-yaourt-groto'),
-  ].filter((p): p is Product => Boolean(p));
+  const arrivalsCampaign = popupQueueService.getAllCampaigns().find((campaign) => campaign.type === 'new_arrivals');
+  const showcaseProducts = (arrivalsCampaign?.featuredProductIds || ['prod-jolof-rice', 'prod-shawarma', 'prod-yaourt-groto'])
+    .map((id) => store.getProductById(id)).filter((p): p is Product => Boolean(p));
 
   const grotoProduct = store.getProductById('prod-yaourt-groto');
   const grotoPackVariant = store.getVariantById('var-groto-pack-revendeuse');
@@ -750,9 +763,9 @@ export const SmartPopupQueue: React.FC<SmartPopupQueueProps> = ({
 
                           <div className="p-3 flex-1 flex flex-col justify-between space-y-2">
                             <div>
-                              <h4 className="font-display font-bold text-xs sm:text-sm text-neutral-900 line-clamp-1">
+                              <button type="button" onClick={() => { handleCloseCurrent(); onViewProduct(prod); }} className="text-left font-display font-bold text-xs sm:text-sm text-neutral-900 line-clamp-1 hover:text-rose-600">
                                 {prod.name}
-                              </h4>
+                              </button>
                               <p className="text-[11px] text-neutral-500 line-clamp-2 mt-0.5">
                                 {prod.short_description}
                               </p>

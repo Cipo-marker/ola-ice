@@ -11,6 +11,14 @@ Application de commande Ola Ice : catalogue, panier, commande avec paiement à l
 
 Au premier démarrage, le serveur crée `data/olaice.sqlite`, charge le catalogue de départ et génère les codes d’accès de l’équipe. Il affiche ces codes une seule fois dans le terminal. Notez-les et communiquez-les uniquement au personnel concerné. Pour choisir votre propre code administrateur avant le premier démarrage, renseignez `OLAICE_ADMIN_PIN` dans `.env` (copiez `.env.example` en `.env`). Les codes des livreurs sont générés séparément.
 
+## Adresses et lieux au Bénin
+
+Les formulaires de lieu chargent les divisions de façon progressive : département, commune, arrondissement, quartier. Chaque niveau est demandé à partir du code du niveau précédent, via l'API publique GeoBJ (`https://geobj.emunadigitalsolution.com/api/v1`). La liste est donc filtrée selon les choix déjà faits. Une connexion Internet est nécessaire pour charger ces référentiels.
+
+## Google Maps et saisie d'adresse
+
+La saisie assistée Google Places et la carte utilisent `VITE_GOOGLE_MAPS_API_KEY`. Pour activer ces fonctions, créez une clé Google Maps Platform, activez Maps JavaScript API et Places API, configurez la facturation, puis restreignez la clé aux domaines de l'application et aux API utilisées. Copiez `.env.example` vers `.env` et remplacez `YOUR_GOOGLE_MAPS_API_KEY`. Sans clé valide, l'adresse reste saisissable manuellement.
+
 ## Données et sauvegardes
 
 - La base complète se trouve dans `data/olaice.sqlite` (ou dans le dossier défini par `OLAICE_DATA_DIR`). Elle n’est pas incluse dans Git.

@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { store } from '../services/store';
 import { customerAuthService } from '../services/customerAuth';
-import { Order, OrderType, CustomerProfile } from '../types';
+import { BeninLocation, Order, OrderType, CustomerProfile } from '../types';
 import {
   computeDistanceToShop,
   requestCurrentPosition,
@@ -12,6 +12,9 @@ import {
   isLikelyInaccurateDesktopLocation,
 } from '../services/distanceService';
 import { DeliveryDistanceMap } from './DeliveryDistanceMap';
+import { BeninLocationSelector } from './BeninLocationSelector';
+import { VoiceNoteRecorder } from './VoiceNoteRecorder';
+import { GooglePlaceAddressInput } from './GooglePlaceAddressInput';
 import {
   X,
   ShieldCheck,
@@ -62,8 +65,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [customerEmail, setCustomerEmail] = useState<string>('');
   const [deliveryAddress, setDeliveryAddress] = useState<string>('');
   const [deliveryLandmark, setDeliveryLandmark] = useState<string>('');
+  const [deliveryLocation, setDeliveryLocation] = useState<BeninLocation | null>(null);
   const [orderType, setOrderType] = useState<OrderType>('standard');
   const [customerNote, setCustomerNote] = useState('');
+  const [customerVoiceNote, setCustomerVoiceNote] = useState<Blob | null>(null);
 
   // GPS Distance delivery state
   const [customerCoords, setCustomerCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -110,6 +115,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       if (currentCustomer.deliveryAddress) setDeliveryAddress(currentCustomer.deliveryAddress);
       if (currentCustomer.deliveryLandmark) setDeliveryLandmark(currentCustomer.deliveryLandmark);
       if (currentCustomer.deliveryZoneId) setSelectedZoneId(currentCustomer.deliveryZoneId);
+      setDeliveryLocation(currentCustomer.deliveryLocation || null);
       if (currentCustomer.latitude && currentCustomer.longitude) {
         const coords = { lat: currentCustomer.latitude, lng: currentCustomer.longitude };
         setCustomerCoords(coords);
@@ -117,6 +123,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         setDistanceResult(calc);
       }
     } else if (context === 'work') {
+      setDeliveryLocation(currentCustomer.workLocation || null);
       if (currentCustomer.workAddress) {
         setDeliveryAddress(currentCustomer.workAddress);
         if (currentCustomer.workLandmark) setDeliveryLandmark(currentCustomer.workLandmark);
@@ -134,6 +141,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     } else if (context === 'custom') {
       setDeliveryAddress('');
       setDeliveryLandmark('');
+      setDeliveryLocation(null);
     }
   };
 
@@ -160,6 +168,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     if (cust.deliveryAddress) {
       setDeliveryAddress(cust.deliveryAddress);
     }
+    setDeliveryLocation(cust.deliveryLocation || null);
     if (cust.deliveryLandmark) {
       setDeliveryLandmark(cust.deliveryLandmark);
     }
@@ -275,7 +284,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       return;
     }
     if (!deliveryAddress.trim()) {
-      setErrorMessage('Veuillez préciser votre quartier et votre adresse de livraison.');
+      setErrorMessage('Veuillez préciser votre adresse de livraison.');
+      return;
+    }
+    if (!deliveryLocation) {
+      setErrorMessage('Sélectionnez le département, la commune, l’arrondissement et le quartier de livraison.');
       return;
     }
 
@@ -303,6 +316,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             phone: customerPhone.trim(),
             workAddress: deliveryAddress.trim(),
             workLandmark: deliveryLandmark.trim(),
+            workLocation: deliveryLocation || undefined,
             workLatitude: customerCoords?.lat,
             workLongitude: customerCoords?.lng,
             workDistanceMeters: distanceResult?.distanceMeters,
@@ -317,6 +331,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             deliveryZoneName: selectedZoneObj?.name,
             deliveryAddress: deliveryAddress.trim(),
             deliveryLandmark: deliveryLandmark.trim(),
+            deliveryLocation: deliveryLocation || undefined,
             latitude: customerCoords?.lat,
             longitude: customerCoords?.lng,
             distanceMeters: distanceResult?.distanceMeters,
@@ -327,6 +342,20 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         }
       }
 
+      const voiceNote = customerVoiceNote
+        ? await new Promise<{ mime_type: string; data_base64: string }>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('La note vocale ne peut pas être lue.'));
+            reader.onload = () => {
+              const dataUrl = String(reader.result || '');
+              const comma = dataUrl.indexOf(',');
+              if (comma < 0) reject(new Error('Format de note vocale invalide.'));
+              else resolve({ mime_type: customerVoiceNote.type || 'audio/webm', data_base64: dataUrl.slice(comma + 1) });
+            };
+            reader.readAsDataURL(customerVoiceNote);
+          })
+        : undefined;
+
       // Create the order with distance metadata
       const result = await store.createOrder({
         customer_id: customerId,
@@ -336,8 +365,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         delivery_zone_id: selectedZoneId,
         delivery_address: deliveryAddress.trim(),
         delivery_landmark: deliveryLandmark.trim() || undefined,
+        delivery_location: deliveryLocation,
         order_type: orderType,
         customer_note: customerNote.trim() || undefined,
+        customer_voice_note: voiceNote,
         custom_delivery_fee: distanceResult ? distanceResult.deliveryFee : undefined,
         customer_latitude: customerCoords?.lat,
         customer_longitude: customerCoords?.lng,
@@ -893,26 +924,37 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               )}
             </div>
 
+            <BeninLocationSelector
+              value={deliveryLocation}
+              onChange={setDeliveryLocation}
+              required
+            />
+
             {/* Detailed Address and Landmark */}
             <div className="grid sm:grid-cols-2 gap-3 sm:gap-4">
               <div className="space-y-1">
                 <label className="block text-xs font-semibold text-neutral-700">
                   {locationContext === 'work'
                     ? 'Adresse ou Entreprise / Bureau *'
-                    : 'Quartier et adresse précise *'}
+                    : 'Adresse détaillée de la maison *'}
                 </label>
-                <textarea
-                  required
-                  rows={2}
-                  value={deliveryAddress}
-                  onChange={(e) => setDeliveryAddress(e.target.value)}
-                  placeholder={
+                <div>
+                  <GooglePlaceAddressInput
+                    value={deliveryAddress}
+                    onChange={setDeliveryAddress}
+                    onSelect={(address, coords) => {
+                      setDeliveryAddress(address);
+                      setCustomerCoords(coords);
+                      setDistanceResult(computeDistanceToShop(coords.lat, coords.lng));
+                    }}
+                    placeholder={
                     locationContext === 'work'
                       ? 'Ex: Agence BOA, étage 2, bureau 14 / Société X'
-                      : 'Ex: Quartier Agonmè, rue 12, maison blanche'
-                  }
-                  className="w-full px-3.5 py-2 rounded-xl border border-neutral-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500 bg-neutral-50"
-                />
+                      : 'Ex: Rue 12, maison blanche avec portail bleu'
+                    }
+                  />
+                  {!import.meta.env.VITE_GOOGLE_MAPS_API_KEY && <p className="mt-1 text-[10px] text-neutral-400">Saisie Google Maps indisponible tant que la clé n’est pas configurée.</p>}
+                </div>
               </div>
 
               <div className="space-y-1">
@@ -965,6 +1007,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 className="w-full px-3.5 py-2 rounded-xl border border-neutral-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500 bg-neutral-50"
               />
             </div>
+
+            <VoiceNoteRecorder onChange={setCustomerVoiceNote} />
 
             {/* Financial Summary */}
             <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-2">

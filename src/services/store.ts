@@ -1,4 +1,4 @@
-import { Category, Product, ProductVariant, DeliveryZone, Order, CartItem, OrderStatus, OrderType, CustomerProfile } from '../types';
+import { BeninLocation, Category, Product, ProductVariant, DeliveryZone, Order, CartItem, OrderStatus, OrderType, CustomerProfile, StaffAccount } from '../types';
 
 const CART_KEY = 'olaice_cart_v1';
 const LAST_ORDER_KEY = 'olaice_last_order_v1';
@@ -20,6 +20,7 @@ class OlaIceStore {
   private zones: DeliveryZone[] = [];
   private orders: Order[] = [];
   private customers: CustomerProfile[] = [];
+  private staff: StaffAccount[] = [];
   private cart: CartItem[] = readCart();
   private subscribers: Array<() => void> = [];
 
@@ -41,22 +42,31 @@ class OlaIceStore {
     this.customers = result.customers;
     this.notify();
   }
+  async refreshStaff() {
+    const result = await api<{ staff: StaffAccount[] }>('/api/admin/staff');
+    this.staff = result.staff;
+    this.notify();
+  }
   async trackOrder(orderNumber: string, phone: string) {
     return api<{ order: Order }>('/api/track-order', { method: 'POST', body: JSON.stringify({ order_number: orderNumber, phone }) });
   }
   subscribe(callback: () => void) { this.subscribers.push(callback); return () => { this.subscribers = this.subscribers.filter((cb) => cb !== callback); }; }
   private notify() { this.subscribers.forEach((callback) => callback()); }
   private saveCart() { localStorage.setItem(CART_KEY, JSON.stringify(this.cart)); this.notify(); }
-  getCategories() { return [...this.categories].sort((a, b) => a.sort_order - b.sort_order); }
+  getCategories() { return [...this.categories].filter((item) => item.is_active !== false).sort((a, b) => a.sort_order - b.sort_order); }
+  getAllCategories() { return [...this.categories].sort((a, b) => a.sort_order - b.sort_order); }
   getProducts() { return this.products.filter((p) => p.status !== 'archived'); }
+  getAllProducts() { return [...this.products]; }
   getProductById(id: string) { return this.products.find((p) => p.id === id); }
   getProductBySlug(slug: string) { return this.products.find((p) => p.slug === slug); }
   getVariantsForProduct(productId: string) { return this.variants.filter((v) => v.product_id === productId && v.is_active); }
+  getAllVariantsForProduct(productId: string) { return this.variants.filter((v) => v.product_id === productId); }
   getVariantById(id: string) { return this.variants.find((v) => v.id === id); }
   getZones() { return this.zones.filter((z) => z.is_active); }
   getAllZones() { return this.zones; }
   getOrders() { return [...this.orders].sort((a, b) => Date.parse(b.placed_at) - Date.parse(a.placed_at)); }
   getCustomers() { return [...this.customers].sort((a, b) => Date.parse(b.lastActiveAt || b.createdAt) - Date.parse(a.lastActiveAt || a.createdAt)); }
+  getStaff() { return [...this.staff].sort((a, b) => a.role.localeCompare(b.role) || a.name.localeCompare(b.name)); }
   getOrderById(id: string) { return this.orders.find((order) => order.id === id); }
   getLastOrder(): Order | null { try { return JSON.parse(localStorage.getItem(LAST_ORDER_KEY) || 'null'); } catch { return null; } }
   getOrderByNumberAndPhone(orderNumber: string, phone?: string) {
@@ -99,7 +109,7 @@ class OlaIceStore {
     const deliveryFee = customDeliveryFee !== undefined ? customDeliveryFee : zone?.delivery_fee || 0;
     return { itemsDetails, subtotal, normalSubtotal, discountAmount: Math.max(0, normalSubtotal - subtotal), deliveryFee, total: subtotal + deliveryFee, itemCount: this.cart.reduce((sum, item) => sum + item.quantity, 0) };
   }
-  async createOrder(payload: { customer_id?: string; customer_name: string; customer_phone: string; customer_email?: string; delivery_zone_id: string; delivery_address: string; delivery_landmark?: string; order_type?: OrderType; customer_note?: string; custom_delivery_fee?: number; customer_latitude?: number; customer_longitude?: number; delivery_distance_meters?: number; delivery_distance_text?: string; delivery_fee_calculation_mode?: 'gps_distance' | 'zone_fixed' }): Promise<{ success: boolean; order?: Order; error?: string }> {
+  async createOrder(payload: { customer_id?: string; customer_name: string; customer_phone: string; customer_email?: string; delivery_zone_id: string; delivery_address: string; delivery_landmark?: string; delivery_location?: BeninLocation | null; order_type?: OrderType; customer_note?: string; customer_voice_note?: { mime_type: string; data_base64: string }; custom_delivery_fee?: number; customer_latitude?: number; customer_longitude?: number; delivery_distance_meters?: number; delivery_distance_text?: string; delivery_fee_calculation_mode?: 'gps_distance' | 'zone_fixed' }): Promise<{ success: boolean; order?: Order; error?: string }> {
     if (!this.cart.length) return { success: false, error: 'Votre panier est vide.' };
     try {
       const result = await api<{ order: Order }>('/api/orders', { method: 'POST', body: JSON.stringify({ ...payload, items: this.cart.map(({ variant_id, quantity, flavor }) => ({ variant_id, quantity, flavor })) }) });
@@ -130,8 +140,37 @@ class OlaIceStore {
     }
   }
   async updateProduct(updated: Product) { await this.persistCatalog('product', updated); await this.initialize(); }
+  async updateCategory(updated: Category) { await this.persistCatalog('category', updated); await this.initialize(); }
   async updateVariant(updated: ProductVariant) { await this.persistCatalog('variant', updated); await this.initialize(); }
   async updateZone(updated: DeliveryZone) { await this.persistCatalog('zone', updated); await this.initialize(); }
+  async archiveCatalog(kind: 'category' | 'product' | 'variant' | 'zone', id: string) {
+    await api(`/api/admin/catalog/${kind}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await this.initialize();
+  }
+  async createCustomer(customer: Pick<CustomerProfile, 'fullName' | 'phone' | 'email'>) {
+    const result = await api<{ customer: CustomerProfile }>('/api/admin/customers', { method: 'POST', body: JSON.stringify({ customer }) });
+    await this.refreshCustomers();
+    return result.customer;
+  }
+  async updateCustomer(customer: CustomerProfile) {
+    const result = await api<{ customer: CustomerProfile }>(`/api/admin/customers/${encodeURIComponent(customer.id)}`, { method: 'PUT', body: JSON.stringify({ customer }) });
+    await this.refreshCustomers();
+    return result.customer;
+  }
+  async archiveCustomer(id: string) {
+    await api(`/api/admin/customers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await this.refreshCustomers();
+  }
+  async saveStaff(staff: Partial<StaffAccount> & { id?: string; pin?: string; name: string; role: 'admin' | 'delivery'; zone: string }) {
+    const creating = !staff.id;
+    const path = creating ? '/api/admin/staff' : `/api/admin/staff/${encodeURIComponent(staff.id!)}`;
+    await api(path, { method: creating ? 'POST' : 'PUT', body: JSON.stringify({ staff }) });
+    await this.refreshStaff();
+  }
+  async archiveStaff(id: string) {
+    await api(`/api/admin/staff/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await this.refreshStaff();
+  }
   private async persistCatalog(kind: string, row: unknown) { await api('/api/admin/catalog', { method: 'PUT', body: JSON.stringify({ kind, row }) }); }
   resetToInitialSeed() { window.dispatchEvent(new CustomEvent('olaice-error', { detail: 'La réinitialisation générale est désactivée pour protéger les commandes enregistrées.' })); }
 }

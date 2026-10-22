@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes, scryptSync, timingSafeEqual, randomUUID } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -30,8 +30,10 @@ CREATE TABLE IF NOT EXISTS order_items(id TEXT PRIMARY KEY, order_id TEXT NOT NU
 CREATE INDEX IF NOT EXISTS order_items_order_idx ON order_items(order_id);
 CREATE TABLE IF NOT EXISTS order_status_histories(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, created_at TEXT NOT NULL, data TEXT NOT NULL, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS inventory_movements(id TEXT PRIMARY KEY, variant_id TEXT NOT NULL, order_id TEXT NOT NULL, movement_type TEXT NOT NULL, quantity INTEGER NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(variant_id) REFERENCES product_variants(id), FOREIGN KEY(order_id) REFERENCES orders(id));
-CREATE TABLE IF NOT EXISTS staff(id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, zone TEXT, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS staff(id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, zone TEXT, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1);
 `);
+
+if (!db.prepare('PRAGMA table_info(staff)').all().some((column) => column.name === 'is_active')) db.exec('ALTER TABLE staff ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
 
 const count = db.prepare('SELECT COUNT(*) AS count FROM categories').get().count;
 if (!count) {
@@ -87,7 +89,7 @@ function send(res, status, body, headers = {}) {
 }
 async function bodyJson(req) {
   const chunks = [];
-  for await (const chunk of req) { chunks.push(chunk); if (chunks.reduce((n, b) => n + b.length, 0) > 1_000_000) throw new Error('Corps de requête trop volumineux.'); }
+  for await (const chunk of req) { chunks.push(chunk); if (chunks.reduce((n, b) => n + b.length, 0) > 12_000_000) throw new Error('Corps de requête trop volumineux.'); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 }
 function staffFrom(req) {
@@ -103,6 +105,7 @@ function loadOrder(id) {
   const row = db.prepare('SELECT data FROM orders WHERE id=?').get(id);
   if (!row) return undefined;
   const order = JSON.parse(row.data);
+  delete order.customer_voice_note_file;
   order.items = db.prepare('SELECT data FROM order_items WHERE order_id=?').all(id).map((item) => JSON.parse(item.data));
   order.status_history = db.prepare('SELECT data FROM order_status_histories WHERE order_id=? ORDER BY created_at').all(id).map((item) => JSON.parse(item.data));
   return order;
@@ -132,7 +135,7 @@ async function route(req, res) {
     const now = Date.now();
     const attempts = (loginAttempts.get(address) || []).filter((time) => now - time < 15 * 60 * 1000);
     if (attempts.length >= 8) return send(res, 429, { error: 'Trop de tentatives. Réessayez dans quelques minutes.' }, { 'retry-after': '900' });
-    const row = db.prepare('SELECT * FROM staff WHERE role=? AND (? IS NULL OR name=?)').get(body.role, body.name ?? null, body.name ?? null);
+    const row = db.prepare('SELECT * FROM staff WHERE role=? AND is_active=1 AND (? IS NULL OR name=?)').get(body.role, body.name ?? null, body.name ?? null);
     if (!row || !matchesPin(body.pin, row)) {
       attempts.push(now); loginAttempts.set(address, attempts);
       return send(res, 401, { error: 'Code d’accès invalide.' });
@@ -152,6 +155,28 @@ async function route(req, res) {
   }
   if (req.method === 'GET' && path === '/api/staff/session') return send(res, 200, { user: staffFrom(req) || null });
 
+  const voiceNoteMatch = req.method === 'GET' && path.match(/^\/api\/orders\/([^/]+)\/voice-note$/);
+  if (voiceNoteMatch) {
+    const staff = staffFrom(req);
+    if (!staff) return send(res, 401, { error: 'Connexion du personnel requise.' });
+    const orderId = decodeURIComponent(voiceNoteMatch[1]);
+    const order = loadOrder(orderId);
+    const storedOrder = db.prepare('SELECT data FROM orders WHERE id=?').get(orderId);
+    const voiceFile = storedOrder ? JSON.parse(storedOrder.data).customer_voice_note_file : undefined;
+    if (!order || !voiceFile) return send(res, 404, { error: 'Note vocale introuvable.' });
+    if (staff.role === 'delivery' && (!['READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'FAILED_DELIVERY'].includes(order.order_status) || order.delivery_agent_name && order.delivery_agent_name !== staff.name)) return send(res, 403, { error: 'Accès à cette note vocale refusé.' });
+    const filename = voiceFile;
+    const safeName = filename.split(/[\\/]/).pop();
+    const audioPath = resolve(dataDir, 'audio-notes', safeName);
+    const audioRoot = resolve(dataDir, 'audio-notes');
+    if (!audioPath.startsWith(`${audioRoot}\\`) && !audioPath.startsWith(`${audioRoot}/`) || !existsSync(audioPath)) return send(res, 404, { error: 'Note vocale introuvable.' });
+    const ext = extname(audioPath).toLowerCase();
+    const contentTypes = { '.webm': 'audio/webm', '.ogg': 'audio/ogg', '.mp4': 'audio/mp4', '.wav': 'audio/wav', '.mp3': 'audio/mpeg' };
+    res.writeHead(200, { 'content-type': contentTypes[ext] || 'application/octet-stream', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' });
+    res.end(readFileSync(audioPath));
+    return;
+  }
+
   if (req.method === 'GET' && path === '/api/orders') {
     const staff = staffFrom(req);
     if (!staff) return send(res, 401, { error: 'Connexion du personnel requise.' });
@@ -163,6 +188,17 @@ async function route(req, res) {
     if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 50) return send(res, 400, { error: 'Votre panier est vide ou invalide.' });
     if (!String(body.customer_name || '').trim() || String(body.customer_phone || '').replace(/\D/g, '').length < 8 || !String(body.delivery_address || '').trim()) return send(res, 400, { error: 'Nom, téléphone et adresse sont obligatoires.' });
     if (body.order_type && !['standard','wholesale','event'].includes(body.order_type)) return send(res, 400, { error: 'Type de commande invalide.' });
+    const voicePayload = body.customer_voice_note;
+    let voiceBuffer, voiceExtension, voiceMime;
+    if (voicePayload) {
+      const supportedAudio = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'mp4', 'audio/wav': 'wav', 'audio/mpeg': 'mp3' };
+      voiceMime = String(voicePayload.mime_type || '').toLowerCase().split(';')[0];
+      voiceExtension = supportedAudio[voiceMime];
+      const encoded = String(voicePayload.data_base64 || '');
+      if (!voiceExtension || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length > 11_184_812) return send(res, 400, { error: 'La note vocale est invalide ou dépasse 8 Mo.' });
+      voiceBuffer = Buffer.from(encoded, 'base64');
+      if (!voiceBuffer.length || voiceBuffer.length > 8 * 1024 * 1024) return send(res, 400, { error: 'La note vocale est invalide ou dépasse 8 Mo.' });
+    }
     const zoneRow = db.prepare('SELECT data FROM delivery_zones WHERE id=?').get(body.delivery_zone_id);
     const zone = zoneRow && JSON.parse(zoneRow.data);
     const hasGpsCoordinates = body.delivery_fee_calculation_mode === 'gps_distance' && Number.isFinite(body.customer_latitude) && Number.isFinite(body.customer_longitude) && Math.abs(body.customer_latitude) <= 90 && Math.abs(body.customer_longitude) <= 180;
@@ -176,6 +212,14 @@ async function route(req, res) {
     const placedAt = new Date().toISOString();
     const datePart = placedAt.slice(0, 10).replaceAll('-', '');
     let order;
+    let voicePath;
+    if (voiceBuffer) {
+      const audioDir = join(dataDir, 'audio-notes');
+      mkdirSync(audioDir, { recursive: true });
+      voicePath = join(audioDir, `${id}.${voiceExtension}`);
+      try { writeFileSync(voicePath, voiceBuffer, { flag: 'wx' }); }
+      catch { return send(res, 500, { error: 'La note vocale n’a pas pu être enregistrée. Réessayez sans note vocale.' }); }
+    }
     db.exec('BEGIN IMMEDIATE');
     try {
       const items = [];
@@ -207,6 +251,7 @@ async function route(req, res) {
       order = {
         id, customer_id: body.customer_id, order_number: code, order_type: body.order_type || (normalSubtotal > subtotal ? 'wholesale' : 'standard'), customer_name: String(body.customer_name).trim(), customer_phone: String(body.customer_phone).trim(), customer_email: body.customer_email || undefined,
         delivery_zone_id: zone?.id || 'zone-gps', delivery_zone_name: zone?.name || 'Livraison mesurée par GPS', delivery_address: String(body.delivery_address).trim(), delivery_landmark: body.delivery_landmark || undefined,
+        delivery_location: body.delivery_location || undefined, customer_voice_note_available: Boolean(voicePath), customer_voice_note_file: voicePath ? `${id}.${voiceExtension}` : undefined,
         customer_latitude: body.customer_latitude, customer_longitude: body.customer_longitude, delivery_distance_meters: serverDistance, delivery_distance_text: serverDistance === undefined ? undefined : serverDistance < 1000 ? `${serverDistance} m` : `${(serverDistance / 1000).toFixed(2).replace('.', ',')} km`, delivery_fee_calculation_mode: serverDistance === undefined ? 'zone_fixed' : 'gps_distance',
         subtotal, delivery_fee: deliveryFee, discount_amount: normalSubtotal - subtotal, total: subtotal + deliveryFee, payment_method: 'cash_on_delivery', payment_status: 'pending', order_status: 'PENDING', customer_note: body.customer_note || undefined,
         placed_at: placedAt, items, status_history: [{ id: randomUUID(), order_id: id, to_status: 'PENDING', changed_by: 'Client Web', comment: 'Commande passée en ligne — paiement à la livraison.', created_at: placedAt }],
@@ -220,12 +265,13 @@ async function route(req, res) {
       for (const entry of order.status_history) saveHistory.run(entry.id, id, entry.created_at, JSON.stringify(entry));
       const phone = order.customer_phone.replace(/\D/g, '');
       const existingCustomer = db.prepare('SELECT id,data FROM customers WHERE phone=?').get(phone);
-      const customer = { id: existingCustomer?.id || randomUUID(), phone: order.customer_phone, fullName: order.customer_name, email: order.customer_email, lastActiveAt: placedAt, createdAt: existingCustomer ? JSON.parse(existingCustomer.data).createdAt : placedAt };
+      const previousCustomer = existingCustomer ? JSON.parse(existingCustomer.data) : {};
+      const customer = { ...previousCustomer, id: existingCustomer?.id || randomUUID(), phone: order.customer_phone, fullName: order.customer_name, email: order.customer_email, deliveryZoneId: order.delivery_zone_id, deliveryLocation: order.delivery_location, deliveryAddress: order.delivery_address, deliveryLandmark: order.delivery_landmark, latitude: body.customer_latitude, longitude: body.customer_longitude, distanceMeters: serverDistance, distanceFormatted: body.delivery_distance_text, calculatedDeliveryFee: order.delivery_fee, locationConfirmed: Boolean(body.customer_latitude != null && body.customer_longitude != null), is_active: previousCustomer.is_active ?? true, lastActiveAt: placedAt, createdAt: existingCustomer ? previousCustomer.createdAt : placedAt };
       db.prepare('INSERT INTO customers(id,phone,data,created_at) VALUES(?,?,?,?) ON CONFLICT(phone) DO UPDATE SET data=excluded.data').run(customer.id, phone, JSON.stringify(customer), customer.createdAt);
       order.customer_id = customer.id;
       db.prepare('UPDATE orders SET data=? WHERE id=?').run(JSON.stringify(order), id);
       db.exec('COMMIT');
-    } catch (error) { db.exec('ROLLBACK'); return send(res, 400, { error: error.message || 'Commande impossible.' }); }
+    } catch (error) { db.exec('ROLLBACK'); if (voicePath && existsSync(voicePath)) unlinkSync(voicePath); return send(res, 400, { error: error.message || 'Commande impossible.' }); }
     return send(res, 201, { order });
   }
   if (req.method === 'POST' && path === '/api/track-order') {
@@ -248,18 +294,104 @@ async function route(req, res) {
     if (!staff) return send(res, 401, { error: 'Connexion du personnel requise.' });
     const isOrderStatusUpdate = req.method === 'PATCH' && path.startsWith('/api/orders/') && path.endsWith('/status');
     if (staff.role !== 'admin' && !isOrderStatusUpdate) return send(res, 403, { error: 'Accès réservé à la direction.' });
-    if (req.method === 'GET' && path === '/api/admin/customers') return send(res, 200, { customers: readRows('customers') });
+    if (req.method === 'GET' && path === '/api/admin/customers') return send(res, 200, { customers: readRows('customers').map((customer) => ({ ...customer, is_active: customer.is_active ?? true })) });
+    if (req.method === 'POST' && path === '/api/admin/customers') {
+      const body = await bodyJson(req);
+      const row = body.customer || {};
+      const phone = String(row.phone || '').trim();
+      const normalizedPhone = phone.replace(/\D/g, '');
+      if (!String(row.fullName || '').trim() || normalizedPhone.length < 8) return send(res, 400, { error: 'Le nom et un numéro de téléphone valide sont obligatoires.' });
+      const duplicate = db.prepare('SELECT id FROM customers WHERE phone=?').get(normalizedPhone);
+      if (duplicate) return send(res, 409, { error: 'Un client utilise déjà ce numéro de téléphone.' });
+      const now = new Date().toISOString();
+      const customer = { id: randomUUID(), phone, fullName: String(row.fullName).trim(), email: String(row.email || '').trim() || undefined, is_active: true, createdAt: now, lastActiveAt: now };
+      db.prepare('INSERT INTO customers(id,phone,data,created_at) VALUES(?,?,?,?)').run(customer.id, normalizedPhone, JSON.stringify(customer), now);
+      return send(res, 201, { customer });
+    }
+    const customerRoute = path.match(/^\/api\/admin\/customers\/([^/]+)$/);
+    if (customerRoute && req.method === 'PUT') {
+      const id = decodeURIComponent(customerRoute[1]);
+      const saved = db.prepare('SELECT phone,data,created_at FROM customers WHERE id=?').get(id);
+      if (!saved) return send(res, 404, { error: 'Client introuvable.' });
+      const body = await bodyJson(req);
+      const row = body.customer || {};
+      const phone = String(row.phone || '').trim();
+      const normalizedPhone = phone.replace(/\D/g, '');
+      if (!String(row.fullName || '').trim() || normalizedPhone.length < 8) return send(res, 400, { error: 'Le nom et un numéro de téléphone valide sont obligatoires.' });
+      const duplicate = db.prepare('SELECT id FROM customers WHERE phone=? AND id<>?').get(normalizedPhone, id);
+      if (duplicate) return send(res, 409, { error: 'Un client utilise déjà ce numéro de téléphone.' });
+      const previous = JSON.parse(saved.data);
+      const customer = { ...previous, ...row, id, phone, fullName: String(row.fullName).trim(), email: String(row.email || '').trim() || undefined, is_active: row.is_active ?? previous.is_active ?? true, lastActiveAt: previous.lastActiveAt || new Date().toISOString() };
+      db.prepare('UPDATE customers SET phone=?,data=? WHERE id=?').run(normalizedPhone, JSON.stringify(customer), id);
+      return send(res, 200, { customer });
+    }
+    if (customerRoute && req.method === 'DELETE') {
+      const id = decodeURIComponent(customerRoute[1]);
+      const saved = db.prepare('SELECT data FROM customers WHERE id=?').get(id);
+      if (!saved) return send(res, 404, { error: 'Client introuvable.' });
+      const customer = { ...JSON.parse(saved.data), is_active: false };
+      db.prepare('UPDATE customers SET data=? WHERE id=?').run(JSON.stringify(customer), id);
+      return send(res, 200, { customer });
+    }
+    if (req.method === 'GET' && path === '/api/admin/staff') {
+      const staffList = db.prepare('SELECT id,name,role,zone,is_active FROM staff ORDER BY role,name').all().map((row) => ({ id: row.id, name: row.name, role: row.role, zone: row.zone || '', is_active: Boolean(row.is_active) }));
+      return send(res, 200, { staff: staffList });
+    }
+    if ((req.method === 'POST' && path === '/api/admin/staff') || (req.method === 'PUT' && path.startsWith('/api/admin/staff/'))) {
+      const creating = req.method === 'POST';
+      const body = await bodyJson(req);
+      const row = body.staff || {};
+      const id = creating ? randomUUID() : decodeURIComponent(path.slice('/api/admin/staff/'.length));
+      const existing = creating ? null : db.prepare('SELECT * FROM staff WHERE id=?').get(id);
+      if (!creating && !existing) return send(res, 404, { error: 'Compte du personnel introuvable.' });
+      const name = String(row.name || '').trim();
+      const role = id === 'admin' ? 'admin' : row.role;
+      const pin = String(row.pin || '');
+      if (!name || !['admin','delivery'].includes(role) || creating && pin.length < 6 || pin && pin.length < 6) return send(res, 400, { error: 'Indiquez un nom, un rôle valide et un code d’accès d’au moins 6 caractères.' });
+      const duplicate = db.prepare('SELECT id FROM staff WHERE name=? AND id<>?').get(name, id);
+      if (duplicate) return send(res, 409, { error: 'Ce nom est déjà attribué à un compte du personnel.' });
+      let pinSalt = existing?.pin_salt, pinHash = existing?.pin_hash;
+      if (pin) { pinSalt = randomBytes(16).toString('hex'); pinHash = scryptSync(pin, pinSalt, 64).toString('hex'); }
+      if (creating) db.prepare('INSERT INTO staff(id,name,role,zone,pin_salt,pin_hash,is_active) VALUES(?,?,?,?,?,?,1)').run(id, name, role, String(row.zone || '').trim() || null, pinSalt, pinHash);
+      else db.prepare('UPDATE staff SET name=?,role=?,zone=?,pin_salt=?,pin_hash=?,is_active=? WHERE id=?').run(name, role, String(row.zone || '').trim() || null, pinSalt, pinHash, row.is_active === false ? 0 : 1, id);
+      return send(res, creating ? 201 : 200, { staff: { id, name, role, zone: row.zone || '', is_active: row.is_active !== false } });
+    }
+    const staffDeleteRoute = path.match(/^\/api\/admin\/staff\/([^/]+)$/);
+    if (staffDeleteRoute && req.method === 'DELETE') {
+      const id = decodeURIComponent(staffDeleteRoute[1]);
+      if (id === 'admin') return send(res, 400, { error: 'Le compte administrateur principal ne peut pas être désactivé.' });
+      const result = db.prepare('UPDATE staff SET is_active=0 WHERE id=?').run(id);
+      if (!result.changes) return send(res, 404, { error: 'Compte du personnel introuvable.' });
+      return send(res, 200, { ok: true });
+    }
     if (req.method === 'PUT' && path === '/api/admin/catalog') {
       const body = await bodyJson(req);
       const kind = body.kind;
       const row = body.row;
-      if (!row?.id || !['product', 'variant', 'zone'].includes(kind)) return send(res, 400, { error: 'Modification invalide.' });
+      if (!row?.id || !['category', 'product', 'variant', 'zone'].includes(kind)) return send(res, 400, { error: 'Modification invalide.' });
+      if (kind === 'category' && !String(row.name || '').trim()) return send(res, 400, { error: 'Le nom de catégorie est obligatoire.' });
+      if (kind === 'product' && (!String(row.name || '').trim() || !db.prepare('SELECT id FROM categories WHERE id=?').get(row.category_id))) return send(res, 400, { error: 'Le produit doit avoir un nom et une catégorie valide.' });
+      if (kind === 'variant' && (!String(row.name || '').trim() || !db.prepare('SELECT id FROM products WHERE id=?').get(row.product_id))) return send(res, 400, { error: 'Le format doit être lié à un produit valide.' });
       if (kind === 'variant' && (![row.price, row.stock_quantity].every((n) => Number.isSafeInteger(n) && n >= 0) || row.wholesale_price != null && (!Number.isSafeInteger(row.wholesale_price) || row.wholesale_price < 0) || row.wholesale_min_quantity != null && (!Number.isSafeInteger(row.wholesale_min_quantity) || row.wholesale_min_quantity < 1) || !String(row.sku || '').trim())) return send(res, 400, { error: 'Prix, seuil ou stock invalide.' });
       if (kind === 'zone' && (!Number.isSafeInteger(row.delivery_fee) || row.delivery_fee < 0)) return send(res, 400, { error: 'Frais de livraison invalides.' });
+      if (kind === 'category') db.prepare('INSERT INTO categories(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(row.id, JSON.stringify(row));
       if (kind === 'product') db.prepare('INSERT INTO products(id,category_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET category_id=excluded.category_id,data=excluded.data').run(row.id, row.category_id, JSON.stringify(row));
       if (kind === 'variant') db.prepare('INSERT INTO product_variants(id,product_id,sku,stock_quantity,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET product_id=excluded.product_id,sku=excluded.sku,stock_quantity=excluded.stock_quantity,data=excluded.data').run(row.id, row.product_id, row.sku, row.stock_quantity, JSON.stringify(row));
       if (kind === 'zone') db.prepare('INSERT INTO delivery_zones(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(row.id, JSON.stringify(row));
       return send(res, 200, { ok: true });
+    }
+    const catalogDelete = req.method === 'DELETE' && path.match(/^\/api\/admin\/catalog\/(category|product|variant|zone)\/([^/]+)$/);
+    if (catalogDelete) {
+      const kind = catalogDelete[1];
+      const id = decodeURIComponent(catalogDelete[2]);
+      const table = { category: 'categories', product: 'products', variant: 'product_variants', zone: 'delivery_zones' }[kind];
+      const saved = db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id);
+      if (!saved) return send(res, 404, { error: 'Élément du catalogue introuvable.' });
+      const row = JSON.parse(saved.data);
+      if (kind === 'product') row.status = 'archived';
+      else row.is_active = false;
+      db.prepare(`UPDATE ${table} SET data=? WHERE id=?`).run(JSON.stringify(row), id);
+      return send(res, 200, { ok: true, row });
     }
     if (req.method === 'PATCH' && (path.startsWith('/api/admin/orders/') || path.startsWith('/api/orders/') && path.endsWith('/status'))) {
       const isAdminRoute = path.startsWith('/api/admin/orders/');

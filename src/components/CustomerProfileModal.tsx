@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { customerAuthService } from '../services/customerAuth';
 import { store } from '../services/store';
-import { CustomerProfile, Order } from '../types';
+import { BeninLocation, CustomerProfile, Order } from '../types';
+import { BeninLocationSelector } from './BeninLocationSelector';
+import { GoogleCurrentLocationButton, GooglePlaceAddressInput } from './GooglePlaceAddressInput';
 import {
   X,
   User,
@@ -52,8 +54,12 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
   const [phone, setPhone] = useState(customer?.phone || '');
   const [deliveryZoneId, setDeliveryZoneId] = useState(customer?.deliveryZoneId || zones[0]?.id || '');
   const [deliveryAddress, setDeliveryAddress] = useState(customer?.deliveryAddress || '');
+  const [deliveryLocation, setDeliveryLocation] = useState<Partial<BeninLocation> | null>(customer?.deliveryLocation || null);
   const [deliveryLandmark, setDeliveryLandmark] = useState(customer?.deliveryLandmark || '');
   const [workAddress, setWorkAddress] = useState(customer?.workAddress || '');
+  const [workLocation, setWorkLocation] = useState<BeninLocation | null>(customer?.workLocation || null);
+  const [homeCoords, setHomeCoords] = useState<{ lat: number; lng: number } | null>(customer?.latitude != null && customer?.longitude != null ? { lat: customer.latitude, lng: customer.longitude } : null);
+  const [workCoords, setWorkCoords] = useState<{ lat: number; lng: number } | null>(customer?.workLatitude != null && customer?.workLongitude != null ? { lat: customer.workLatitude, lng: customer.workLongitude } : null);
   const [workLandmark, setWorkLandmark] = useState(customer?.workLandmark || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [activeTab, setActiveTab] = useState<'profile' | 'orders'>('profile');
@@ -65,8 +71,12 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
       setPhone(customer.phone || '');
       if (customer.deliveryZoneId) setDeliveryZoneId(customer.deliveryZoneId);
       setDeliveryAddress(customer.deliveryAddress || '');
+      setDeliveryLocation(customer.deliveryLocation || null);
       setDeliveryLandmark(customer.deliveryLandmark || '');
       setWorkAddress(customer.workAddress || '');
+      setWorkLocation(customer.workLocation || null);
+      setHomeCoords(customer.latitude != null && customer.longitude != null ? { lat: customer.latitude, lng: customer.longitude } : null);
+      setWorkCoords(customer.workLatitude != null && customer.workLongitude != null ? { lat: customer.workLatitude, lng: customer.workLongitude } : null);
       setWorkLandmark(customer.workLandmark || '');
     }
   }, [customer, isOpen]);
@@ -86,8 +96,14 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
       deliveryZoneId,
       deliveryZoneName: selectedZone?.name || customer.deliveryZoneName,
       deliveryAddress: deliveryAddress.trim(),
+      deliveryLocation: deliveryLocation?.department_code && deliveryLocation.commune_code && deliveryLocation.arrondissement_code && deliveryLocation.quarter_code ? deliveryLocation as BeninLocation : undefined,
+      latitude: homeCoords?.lat,
+      longitude: homeCoords?.lng,
       deliveryLandmark: deliveryLandmark.trim(),
       workAddress: workAddress.trim(),
+      workLocation: workLocation || undefined,
+      workLatitude: workCoords?.lat,
+      workLongitude: workCoords?.lng,
       workLandmark: workLandmark.trim(),
     });
 
@@ -284,17 +300,18 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
                 </select>
               </div>
 
+              <div className="rounded-2xl border border-rose-100 bg-rose-50/60 p-3.5 space-y-2">
+                <p className="text-xs font-bold text-neutral-800">Adresse de livraison</p>
+                <p className="text-[11px] text-neutral-600">Détectez votre position pour préremplir l’adresse et, si Google les reconnaît, les lieux administratifs. Vérifiez les champs avant d’enregistrer.</p>
+                <GoogleCurrentLocationButton onSelect={(address, coords, location) => { setDeliveryAddress(address); setHomeCoords(coords); if (location && Object.keys(location).length) setDeliveryLocation(location); }} />
+              </div>
+              <BeninLocationSelector value={deliveryLocation} onChange={(location) => setDeliveryLocation(location)} />
+
               <div className="space-y-1">
                 <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700">
                   Adresse exacte ou Quartier
                 </label>
-                <input
-                  type="text"
-                  value={deliveryAddress}
-                  onChange={(e) => setDeliveryAddress(e.target.value)}
-                  placeholder="Ex: Haie Vive, rue des Cocotiers, maison blanche portail bleu"
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500 bg-neutral-50"
-                />
+                <GooglePlaceAddressInput value={deliveryAddress} onChange={setDeliveryAddress} onSelect={(address, coords) => { setDeliveryAddress(address); setHomeCoords(coords); }} placeholder="Ex: rue, numéro de maison, portail…" />
               </div>
 
               <div className="space-y-1">
@@ -318,17 +335,12 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
                 </div>
 
                 <div className="space-y-2">
+                  <BeninLocationSelector value={workLocation} onChange={setWorkLocation} compact />
                   <div className="space-y-1">
                     <label className="block text-[11px] font-semibold text-sky-900">
                       Entreprise, service ou adresse de bureau
                     </label>
-                    <input
-                      type="text"
-                      value={workAddress}
-                      onChange={(e) => setWorkAddress(e.target.value)}
-                      placeholder="Ex: Direction Société X, 2ème étage, bureau 14"
-                      className="w-full px-3.5 py-2 rounded-xl border border-sky-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 bg-white"
-                    />
+                    <GooglePlaceAddressInput value={workAddress} onChange={setWorkAddress} onSelect={(address, coords) => { setWorkAddress(address); setWorkCoords(coords); }} placeholder="Ex: direction, rue et numéro du bureau…" />
                   </div>
 
                   <div className="space-y-1">
